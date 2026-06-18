@@ -1,0 +1,93 @@
+# 物业设备巡检规则配置
+# ======================================================================
+
+# 设备类别定义
+device_categories:
+  - code: elevator
+    name: 电梯
+    defect_types:
+      - 门机故障
+      - 按钮失灵
+      - 轿厢异响
+      - 曳引机异常
+      - 光幕故障
+
+  - code: fire_alarm
+    name: 消防报警
+    defect_types:
+      - 探测器故障
+      - 手报按钮损坏
+      - 报警主机异常
+      - 喷淋压力不足
+
+  - code: hvac
+    name: 暖通空调
+    defect_types:
+      - 风机异响
+      - 滤网堵塞
+      - 管道漏水
+      - 温控失灵
+
+  - code: lighting
+    name: 公共照明
+    defect_types:
+      - 灯具损坏
+      - 开关故障
+      - 线路老化
+
+  - code: plumbing
+    name: 给排水
+    defect_types:
+      - 管道漏水
+      - 阀门损坏
+      - 排水堵塞
+      - 水表异常
+
+# 严重等级定义
+severity_levels:
+  - level: critical
+    name: 严重
+    color: "#dc2626"
+    rectify_hours: 4
+
+  - level: high
+    name: 高
+    color: "#f97316"
+    rectify_hours: 24
+
+  - level: medium
+    name: 中
+    color: "#eab308"
+    rectify_hours: 72
+
+  - level: low
+    name: 低
+    color: "#22c55e"
+    rectify_hours: 168
+
+# 重复归并窗口（小时）
+# 同一楼栋、同一设备、同一缺陷类型，在该时间窗口内视为同一缺陷
+merge_window_hours: 24
+
+# 必填字段
+required_fields:
+  - building
+  - device_id
+  - device_category
+  - defect_type
+  - severity
+  - inspect_time
+  - description
+
+# CSV 字段映射
+# 左边是内部字段名，右边是 CSV 中的列名
+csv_field_mapping:
+  building: 楼栋
+  device_id: 设备编号
+  device_category: 设备类别
+  defect_type: 缺陷类型
+  severity: 严重等级
+  description: 缺陷描述
+  inspect_time: 巡检时间
+  inspector: 巡检员
+  location: 具体位置
