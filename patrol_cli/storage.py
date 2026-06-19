@@ -132,17 +132,22 @@ class PatrolState:
         return filename in self.imported_files
 
     def snapshot_defects(self) -> Dict[str, Any]:
-        """获取缺陷快照（用于撤销）"""
-        return {
+        """获取缺陷快照（用于撤销），包含 imported_files 状态"""
+        snapshot = {
             defect_id: defect.to_dict()
             for defect_id, defect in self.defects.items()
         }
+        snapshot["__imported_files__"] = list(self.imported_files)
+        return snapshot
 
     def restore_defects(self, snapshot: Dict[str, Any]):
-        """从快照恢复缺陷"""
+        """从快照恢复缺陷和 imported_files"""
         self.defects = {}
-        for def_id, def_data in snapshot.items():
-            self.defects[def_id] = DefectRecord.from_dict(def_data)
+        for key, def_data in snapshot.items():
+            if key == "__imported_files__":
+                self.imported_files = list(def_data)
+                continue
+            self.defects[key] = DefectRecord.from_dict(def_data)
 
     def add_import_log(self, log_entry: ImportLogEntry):
         """添加导入日志"""

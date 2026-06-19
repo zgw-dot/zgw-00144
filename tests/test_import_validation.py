@@ -827,3 +827,154 @@ class TestPostImportConsistency:
         assert last_log.filename == "log_consistent.csv"
         assert last_log.batch_id == "BATCH-LOG-CONSIST"
         assert last_log.result == "success"
+
+
+class TestUndoRollback:
+    """撤销回滚完整性测试 - 缺陷数、已导入文件数、日志、导出全链路一致"""
+
+    def test_undo_rollback_imported_files_and_defects(self, config, temp_data_dir, tmp_path):
+        """撤销后缺陷数和已导入文件数同步回退"""
+        state = PatrolState(data_dir=temp_data_dir)
+        batch_id = "BATCH-TEST-UNDO"
+
+        csv1 = tmp_path / "baseline.csv"
+        write_csv(csv1, [
+            "1号楼,EL-001,elevator,门机故障,critical,基线缺陷1,2025-06-15 08:30:00,张三,1单元",
+            "2号楼,EL-002,elevator,按钮失灵,medium,基线缺陷2,2025-06-15 09:00:00,李四,2单元",
+        ])
+        import_and_merge(str(csv1), config, state, batch_id)
+
+        stats_after_baseline = state.stats()
+        assert stats_after_baseline["total"] == 2
+        assert stats_after_baseline["imported_files"] == 1
+        assert state.is_file_imported("baseline.csv") is True
+        assert state.can_undo() is True
+
+        csv2 = tmp_path / "second_import.csv"
+        write_csv(csv2, [
+            "1号楼,EL-001,elevator,门机故障,critical,新增合并到基线缺陷1,2025-06-15 10:00:00,王五,1单元",
+            "3号楼,EL-003,elevator,光幕故障,high,新增缺陷3,2025-06-16 14:00:00,赵六,3单元",
+        ])
+        result = import_and_merge(str(csv2), config, state, batch_id)
+
+        stats_after_second = state.stats()
+        assert stats_after_second["total"] == 3
+        assert stats_after_second["imported_files"] == 2
+        assert state.is_file_imported("second_import.csv") is True
+        assert result.new_defects == 1
+        assert result.merged_defects == 1
+
+        from patrol_cli.workflow import undo_last
+        action = undo_last(state)
+        assert action == "导入文件 second_import.csv"
+
+        stats_after_undo = state.stats()
+        assert stats_after_undo["total"] == 2, f"撤销后缺陷数应为2，实际为{stats_after_undo['total']}"
+        assert stats_after_undo["imported_files"] == 1, f"撤销后已导入文件数应为1，实际为{stats_after_undo['imported_files']}"
+        assert state.is_file_imported("baseline.csv") is True
+        assert state.is_file_imported("second_import.csv") is False, "撤销后second_import.csv不应再标记为已导入"
+        assert state.can_undo() is True
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        stats_reload = state2.stats()
+        assert stats_reload["total"] == 2
+        assert stats_reload["imported_files"] == 1
+        assert state2.is_file_imported("second_import.csv") is False
+
+    def test_undo_then_reimport_same_file(self, config, temp_data_dir, tmp_path):
+        """撤销后可以重新导入同一份CSV"""
+        state = PatrolState(data_dir=temp_data_dir)
+        batch_id = "BATCH-TEST-REIMPORT"
+
+        csv_path = tmp_path / "reimport.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,测试撤销重导,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        result1 = import_and_merge(str(csv_path), config, state, batch_id)
+        assert result1.new_defects == 1
+        assert state.is_file_imported("reimport.csv") is True
+
+        from patrol_cli.workflow import undo_last
+        undo_last(state)
+        assert state.is_file_imported("reimport.csv") is False
+
+        result2 = import_and_merge(str(csv_path), config, state, batch_id)
+        assert result2.new_defects == 1
+        assert state.is_file_imported("reimport.csv") is True
+
+        stats = state.stats()
+        assert stats["total"] == 1
+        assert stats["imported_files"] == 1
+
+    def test_undo_rollback_log_and_export_consistency(self, config, temp_data_dir, tmp_path):
+        """撤销后导入日志、导出结果与回滚状态一致"""
+        state = PatrolState(data_dir=temp_data_dir)
+        batch_id = "BATCH-TEST-LOG"
+
+        csv1 = tmp_path / "log_test1.csv"
+        write_csv(csv1, [
+            "1号楼,EL-001,elevator,门机故障,critical,日志测试1,2025-06-15 08:30:00,张三,1单元",
+        ])
+        import_and_merge(str(csv1), config, state, batch_id)
+
+        csv2 = tmp_path / "log_test2.csv"
+        write_csv(csv2, [
+            "2号楼,EL-002,elevator,按钮失灵,medium,日志测试2,2025-06-15 09:00:00,李四,2单元",
+        ])
+        import_and_merge(str(csv2), config, state, batch_id)
+
+        logs_before = state.get_import_logs()
+        assert len([l for l in logs_before if l.log_type == "import"]) == 2
+
+        from patrol_cli.workflow import undo_last
+        undo_last(state)
+
+        logs_after = state.get_import_logs()
+        assert len([l for l in logs_after if l.log_type == "import"]) == 2, "撤销不影响导入日志记录"
+
+        last_log = state.get_last_import_log("import")
+        assert last_log is not None
+        assert last_log.filename == "log_test2.csv"
+        assert last_log.result == "success"
+
+        from patrol_cli.exporter import export_html
+        html_path = tmp_path / "export_after_undo.html"
+        export_html(state, str(html_path), config)
+
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+        assert "last-import" in html_content
+        assert "log_test2.csv" in html_content
+        assert batch_id in html_content
+
+        stats = state.stats()
+        assert stats["total"] == 1
+        assert stats["imported_files"] == 1
+
+    def test_undo_rollback_duplicate_check_after_reimport(self, config, temp_data_dir, tmp_path):
+        """重新导入后重复导入判断正确生效"""
+        state = PatrolState(data_dir=temp_data_dir)
+        batch_id = "BATCH-TEST-DUP"
+
+        csv_path = tmp_path / "dup_test.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,重复测试,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        import_and_merge(str(csv_path), config, state, batch_id)
+        assert state.is_file_imported("dup_test.csv") is True
+
+        from patrol_cli.workflow import undo_last
+        undo_last(state)
+        assert state.is_file_imported("dup_test.csv") is False
+
+        import_and_merge(str(csv_path), config, state, batch_id)
+        assert state.is_file_imported("dup_test.csv") is True
+
+        with pytest.raises(ValueError, match="已经导入过了"):
+            import_and_merge(str(csv_path), config, state, batch_id)
+
+        stats = state.stats()
+        assert stats["total"] == 1
+        assert stats["imported_files"] == 1

@@ -19,10 +19,22 @@ DEFAULT_DATA_DIR = "data"
 
 def _terminal_supports_unicode() -> bool:
     """检测终端是否支持 Unicode 字符（不产生实际输出）"""
+    import os
+
+    NON_UNICODE_ENCODINGS = {"gbk", "gb2312", "cp936", "ms936"}
+
+    env_encoding = os.environ.get("PYTHONIOENCODING", "")
+    if env_encoding:
+        enc = env_encoding.split(":")[0].lower()
+        if enc in NON_UNICODE_ENCODINGS:
+            return False
+
     encoding = getattr(sys.stdout, "encoding", "") or ""
     encoding_lower = encoding.lower()
     if "utf" in encoding_lower:
         return True
+    if encoding_lower in NON_UNICODE_ENCODINGS:
+        return False
     try:
         test_chars = "\u26a0\u2713"
         encoding_obj = sys.stdout.encoding
@@ -330,7 +342,7 @@ def review(ctx, defect_id, new_status, remark, handler):
     try:
         defect = review_defect(state, defect_id, new_status, remark, handler)
         status_name = STATUS_NAMES.get(new_status, new_status)
-        click.echo(click.style(f"复核成功: {defect_id} → {status_name}", fg="green"))
+        click.echo(click.style(f"复核成功: {defect_id} {_sym('arrow')} {status_name}", fg="green"))
         if remark:
             click.echo(f"  备注: {remark}")
         if handler:
@@ -491,7 +503,7 @@ def show(ctx, defect_id):
             to_name = STATUS_NAMES.get(h["to"], h["to"])
             handler = h.get("handler", "-")
             remark = h.get("remark", "")
-            click.echo(f"  {h['time'][:19]}: {from_name} → {to_name} "
+            click.echo(f"  {h['time'][:19]}: {from_name} {_sym('arrow')} {to_name} "
                        f"[{handler}] {remark}")
 
 
