@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate
+from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry
 
 
 class PatrolState:
@@ -22,6 +22,7 @@ class PatrolState:
         self.review_log_file = self.data_dir / "review_log.json"
         self.drafts_file = self.data_dir / "drafts.json"
         self.templates_file = self.data_dir / "templates.json"
+        self.audit_log_file = self.data_dir / "audit_log.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
@@ -31,6 +32,7 @@ class PatrolState:
         self.review_logs: List[ReviewLogEntry] = []
         self.drafts: Dict[str, DraftEntry] = {}
         self.templates: Dict[str, DraftTemplate] = {}
+        self.audit_logs: List[AuditLogEntry] = []
 
         self._load()
 
@@ -77,6 +79,11 @@ class PatrolState:
                 for tpl_id, tpl_data in templates_data.items():
                     self.templates[tpl_id] = DraftTemplate.from_dict(tpl_data)
 
+        if self.audit_log_file.exists():
+            with open(self.audit_log_file, "r", encoding="utf-8") as f:
+                audit_data = json.load(f)
+                self.audit_logs = [AuditLogEntry.from_dict(d) for d in audit_data]
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -101,6 +108,7 @@ class PatrolState:
         self.save_review_logs()
         self.save_drafts()
         self.save_templates()
+        self.save_audit_logs()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -348,3 +356,32 @@ class PatrolState:
         templates = list(self.templates.values())
         templates.sort(key=lambda t: t.created_at, reverse=True)
         return templates
+
+    def add_audit_log(self, entry: AuditLogEntry):
+        """添加审计日志"""
+        self.audit_logs.append(entry)
+
+    def save_audit_logs(self):
+        """单独保存审计日志"""
+        logs_data = [log.to_dict() for log in self.audit_logs]
+        with open(self.audit_log_file, "w", encoding="utf-8") as f:
+            json.dump(logs_data, f, ensure_ascii=False, indent=2)
+
+    def get_audit_logs(
+        self,
+        action: str = "",
+        target_type: str = "",
+        target_id: str = "",
+        limit: int = 0
+    ) -> List[AuditLogEntry]:
+        """获取审计日志，按时间倒序，支持筛选"""
+        logs = sorted(self.audit_logs, key=lambda x: x.timestamp, reverse=True)
+        if action:
+            logs = [l for l in logs if l.action == action]
+        if target_type:
+            logs = [l for l in logs if l.target_type == target_type]
+        if target_id:
+            logs = [l for l in logs if l.target_id == target_id]
+        if limit > 0:
+            return logs[:limit]
+        return logs

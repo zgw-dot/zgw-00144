@@ -12,11 +12,13 @@ from patrol_cli.storage import PatrolState
 from patrol_cli.workflow import (
     create_template, update_template, delete_template,
     create_draft, create_draft_from_template,
-    execute_draft, WorkflowError
+    execute_draft, WorkflowError,
+    snapshot_health_check, snapshot_patch
 )
 from patrol_cli.exporter import (
     export_draft_csv, export_draft_list_csv,
-    _resolve_template_fields, _classify_snapshot
+    _resolve_template_fields, _classify_snapshot,
+    export_health_check_csv, export_health_check_json
 )
 from patrol_cli.cli import _resolve_draft_template_info, _classify_snapshot as cli_classify_snapshot
 
@@ -763,6 +765,474 @@ def test_12_classify_snapshot_unit():
     print("  [OK] 测试12通过")
 
 
+def test_13_snapshot_health_check():
+    """测试13: 快照体检——完整/残缺/缺失三档分类，不改任何状态"""
+    print("\n" + "=" * 60)
+    print("测试13: 快照体检")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-013"
+
+        defect1 = create_sample_defect(state, "DEF-HC-001")
+        defect2 = create_sample_defect(state, "DEF-HC-002", building="2号楼")
+        defect3 = create_sample_defect(state, "DEF-HC-003", building="3号楼")
+        defect4 = create_sample_defect(state, "DEF-HC-004", building="4号楼")
+
+        tpl_complete = create_template(
+            state, name="完整模板-HC", target_status="dispatched", handler="甲"
+        )
+        tpl_missing = create_template(
+            state, name="缺失模板-HC", target_status="closed", handler="乙"
+        )
+
+        draft_complete = create_draft_from_template(
+            state, template_id=tpl_complete.template_id,
+            source="DEF-HC-001", source_type="ids"
+        )
+        execute_draft(state, draft_complete.draft_id)
+
+        draft_incomplete = create_draft_from_template(
+            state, template_id=tpl_complete.template_id,
+            source="DEF-HC-002", source_type="ids"
+        )
+        draft_incomplete.template_snapshot = {"name": "完整模板-HC"}
+        state.update_draft(draft_incomplete)
+        state.save_drafts()
+
+        draft_missing = create_draft(
+            state, source="DEF-HC-003", source_type="ids",
+            target_status="closed", name="老数据草稿"
+        )
+        draft_missing.template_id = tpl_missing.template_id
+        draft_missing.template_snapshot = {}
+        state.update_draft(draft_missing)
+        state.save_drafts()
+
+        draft_no_tpl = create_draft(
+            state, source="DEF-HC-004", source_type="ids",
+            target_status="false_positive", name="非模板草稿"
+        )
+
+        results = snapshot_health_check(state)
+        id_to_r = {r["draft_id"]: r for r in results}
+
+        r_complete = id_to_r[draft_complete.draft_id]
+        print(f"  完整快照草稿: status={r_complete['snapshot_status']}, "
+              f"sealed={r_complete['sealed']}, can_patch={r_complete['can_patch']}")
+        assert r_complete["snapshot_status"] == "complete"
+        assert r_complete["sealed"] is False
+        assert r_complete["can_patch"] is True
+        assert r_complete["missing_fields"] == []
+
+        r_incomplete = id_to_r[draft_incomplete.draft_id]
+        print(f"  残缺快照草稿: status={r_incomplete['snapshot_status']}, "
+              f"missing={r_incomplete['missing_fields']}, can_patch={r_incomplete['can_patch']}")
+        assert r_incomplete["snapshot_status"] == "incomplete"
+        assert "目标状态" in r_incomplete["missing_fields"]
+        assert "处理人" in r_incomplete["missing_fields"]
+        assert r_incomplete["can_patch"] is True
+
+        r_missing = id_to_r[draft_missing.draft_id]
+        print(f"  老数据草稿: status={r_missing['snapshot_status']}, "
+              f"can_patch={r_missing['can_patch']}, risk={r_missing['risk_reason']}")
+        assert r_missing["snapshot_status"] == "missing"
+        assert r_missing["can_patch"] is True
+
+        r_no_tpl = id_to_r[draft_no_tpl.draft_id]
+        print(f"  非模板草稿: can_patch={r_no_tpl['can_patch']}, reason={r_no_tpl['cannot_patch_reason']}")
+        assert r_no_tpl["can_patch"] is False
+        assert "非模板草稿" in r_no_tpl["cannot_patch_reason"]
+
+        before_statuses = {d.draft_id: d.status for d in state.drafts.values()}
+        before_sealed = {d.draft_id: d.snapshot_sealed_at for d in state.drafts.values()}
+
+        reloaded = PatrolState(data_dir=test_dir)
+        for draft_after in reloaded.drafts.values():
+            assert draft_after.status == before_statuses[draft_after.draft_id], "体检不应改变草稿状态"
+            assert draft_after.snapshot_sealed_at == before_sealed[draft_after.draft_id], "体检不应改变封存状态"
+
+        print("  [OK] 测试13通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_14_snapshot_patch_and_seal():
+    """测试14: 补档——封存模板快照为只读副本，补档后不可再补"""
+    print("\n" + "=" * 60)
+    print("测试14: 补档封存")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-014"
+
+        defect1 = create_sample_defect(state, "DEF-PATCH-001")
+        defect2 = create_sample_defect(state, "DEF-PATCH-002", building="2号楼")
+
+        tpl = create_template(
+            state, name="补档模板", target_status="dispatched", handler="丙"
+        )
+
+        draft_complete = create_draft_from_template(
+            state, template_id=tpl.template_id,
+            source="DEF-PATCH-001", source_type="ids"
+        )
+
+        draft_missing = create_draft(
+            state, source="DEF-PATCH-002", source_type="ids",
+            target_status="dispatched", name="老数据草稿-待补档"
+        )
+        draft_missing.template_id = tpl.template_id
+        draft_missing.template_snapshot = {}
+        state.update_draft(draft_missing)
+        state.save_drafts()
+
+        result = snapshot_patch(state, [draft_complete.draft_id, draft_missing.draft_id])
+        print(f"  补档结果: patched={result['patched']}, errors={result['errors']}, "
+              f"audit_id={result['audit_id']}")
+        assert len(result["patched"]) == 2
+        assert result["errors"] == []
+        assert result["audit_id"]
+
+        draft_complete_r = state.get_draft(draft_complete.draft_id)
+        draft_missing_r = state.get_draft(draft_missing.draft_id)
+        assert draft_complete_r.snapshot_sealed_at != ""
+        assert draft_missing_r.snapshot_sealed_at != ""
+        assert draft_missing_r.template_snapshot["name"] == "补档模板"
+        assert draft_missing_r.template_snapshot["handler"] == "丙"
+        assert draft_missing_r.template_snapshot["target_status"] == "dispatched"
+
+        health = snapshot_health_check(state)
+        id_to_h = {h["draft_id"]: h for h in health}
+        assert id_to_h[draft_complete.draft_id]["sealed"] is True
+        assert id_to_h[draft_missing.draft_id]["sealed"] is True
+        assert id_to_h[draft_complete.draft_id]["can_patch"] is False
+        assert "已封存" in id_to_h[draft_complete.draft_id]["cannot_patch_reason"]
+        assert id_to_h[draft_missing.draft_id]["can_patch"] is False
+
+        result2 = snapshot_patch(state, [draft_complete.draft_id])
+        assert len(result2["patched"]) == 0
+        assert len(result2["errors"]) > 0
+        assert result2["audit_id"]
+
+        audit_logs = state.get_audit_logs(action="snapshot_patch")
+        assert len(audit_logs) == 2
+        assert audit_logs[0].result == "failed"
+
+        print("  [OK] 测试14通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_15_patch_batch_conflict():
+    """测试15: 批次校验——来源冲突/重复/字段对不上整批失败并记审计日志"""
+    print("\n" + "=" * 60)
+    print("测试15: 批次校验冲突")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-015"
+
+        defect1 = create_sample_defect(state, "DEF-CONFLICT-001")
+        defect2 = create_sample_defect(state, "DEF-CONFLICT-002", building="2号楼")
+
+        tpl = create_template(
+            state, name="冲突模板", target_status="dispatched", handler="丁"
+        )
+
+        draft_incomplete = create_draft_from_template(
+            state, template_id=tpl.template_id,
+            source="DEF-CONFLICT-001", source_type="ids"
+        )
+        draft_incomplete.template_snapshot = {"name": "冲突模板", "target_status": "closed"}
+        state.update_draft(draft_incomplete)
+        state.save_drafts()
+
+        draft_no_tpl = create_draft(
+            state, source="DEF-CONFLICT-002", source_type="ids",
+            target_status="false_positive", name="非模板草稿"
+        )
+
+        result = snapshot_patch(state, [draft_no_tpl.draft_id])
+        assert len(result["patched"]) == 0
+        assert len(result["errors"]) > 0
+        assert any("非模板草稿" in e for e in result["errors"])
+        print(f"  非模板草稿拦截: {result['errors']}")
+
+        result2 = snapshot_patch(state, [draft_incomplete.draft_id])
+        assert len(result2["patched"]) == 0
+        assert len(result2["errors"]) > 0
+        assert any("来源冲突" in e or "不一致" in e for e in result2["errors"])
+        print(f"  来源冲突拦截: {result2['errors']}")
+
+        result3 = snapshot_patch(state, [draft_incomplete.draft_id, draft_incomplete.draft_id])
+        assert len(result3["patched"]) == 0
+        assert any("重复" in e for e in result3["errors"])
+        print(f"  重复ID拦截: {result3['errors']}")
+
+        audit_failed = state.get_audit_logs(action="snapshot_patch")
+        failed_logs = [l for l in audit_failed if l.result == "failed"]
+        assert len(failed_logs) >= 3
+        print(f"  审计日志记录: {len(failed_logs)} 条失败记录")
+
+        print("  [OK] 测试15通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_16_patch_immutability():
+    """测试16: 补档后不可变——模板改名/删除/覆盖导入后，快照仍一致"""
+    print("\n" + "=" * 60)
+    print("测试16: 补档后不可变")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-016"
+
+        defect1 = create_sample_defect(state, "DEF-IMMU-001")
+        defect2 = create_sample_defect(state, "DEF-IMMU-002", building="2号楼")
+
+        tpl = create_template(
+            state, name="不可变模板", target_status="dispatched",
+            handler="戊", remark="原始备注"
+        )
+
+        draft1 = create_draft_from_template(
+            state, template_id=tpl.template_id,
+            source="DEF-IMMU-001", source_type="ids"
+        )
+        execute_draft(state, draft1.draft_id)
+
+        draft2 = create_draft(
+            state, source="DEF-IMMU-002", source_type="ids",
+            target_status="dispatched", name="老数据草稿"
+        )
+        draft2.template_id = tpl.template_id
+        draft2.template_snapshot = {}
+        state.update_draft(draft2)
+        state.save_drafts()
+
+        result = snapshot_patch(state, [draft1.draft_id, draft2.draft_id])
+        assert len(result["patched"]) == 2
+
+        snap1_before = state.get_draft(draft1.draft_id).template_snapshot.copy()
+        snap2_before = state.get_draft(draft2.draft_id).template_snapshot.copy()
+
+        update_template(
+            state, template_id=tpl.template_id,
+            name="不可变模板-已改名", handler="己"
+        )
+
+        delete_template(state, tpl.template_id)
+
+        draft1_r = state.get_draft(draft1.draft_id)
+        draft2_r = state.get_draft(draft2.draft_id)
+        assert draft1_r.template_snapshot == snap1_before, "模板改名+删除后，已封存快照不应变"
+        assert draft2_r.template_snapshot == snap2_before, "模板改名+删除后，已封存快照不应变"
+        assert draft1_r.template_snapshot["name"] == "不可变模板"
+        assert draft1_r.template_snapshot["handler"] == "戊"
+
+        tpl_info = _resolve_draft_template_info(state, draft1_r)
+        assert "已封存" in tpl_info["note"]
+        assert tpl_info["snapshot_handler"] == "戊"
+
+        tpl_export = _resolve_template_fields(state, draft1_r)
+        assert "已封存" in tpl_export["template_note"]
+        assert "不可变" in tpl_export["template_note"]
+        assert tpl_export["snapshot_completeness_label"] == "完整快照(已封存)"
+
+        print("  [OK] 测试16通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_17_patch_restart_consistency():
+    """测试17: 补档后重启——体检结果、导出结果一致"""
+    print("\n" + "=" * 60)
+    print("测试17: 补档后重启一致性")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-017"
+
+        defect1 = create_sample_defect(state, "DEF-RESTART-PATCH-001")
+        defect2 = create_sample_defect(state, "DEF-RESTART-PATCH-002", building="2号楼")
+
+        tpl = create_template(
+            state, name="重启模板", target_status="closed", handler="庚"
+        )
+
+        draft1 = create_draft_from_template(
+            state, template_id=tpl.template_id,
+            source="DEF-RESTART-PATCH-001", source_type="ids"
+        )
+        execute_draft(state, draft1.draft_id)
+
+        draft2 = create_draft(
+            state, source="DEF-RESTART-PATCH-002", source_type="ids",
+            target_status="closed", name="老数据待补档"
+        )
+        draft2.template_id = tpl.template_id
+        draft2.template_snapshot = {}
+        state.update_draft(draft2)
+        state.save_drafts()
+        execute_draft(state, draft2.draft_id)
+
+        result = snapshot_patch(state, [draft1.draft_id, draft2.draft_id])
+        assert len(result["patched"]) == 2
+
+        health_before = snapshot_health_check(state)
+        csv_path_before = os.path.join(test_dir, "health_before.csv")
+        json_path_before = os.path.join(test_dir, "health_before.json")
+        export_health_check_csv(health_before, csv_path_before)
+        export_health_check_json(health_before, json_path_before)
+
+        draft_csv_before = os.path.join(test_dir, "draft_before.csv")
+        export_draft_csv(state, draft1.draft_id, draft_csv_before)
+
+        state2 = PatrolState(data_dir=test_dir)
+
+        health_after = snapshot_health_check(state2)
+        csv_path_after = os.path.join(test_dir, "health_after.csv")
+        json_path_after = os.path.join(test_dir, "health_after.json")
+        export_health_check_csv(health_after, csv_path_after)
+        export_health_check_json(health_after, json_path_after)
+
+        draft_csv_after = os.path.join(test_dir, "draft_after.csv")
+        export_draft_csv(state2, draft1.draft_id, draft_csv_after)
+
+        import json as json_mod
+        with open(json_path_before, "r", encoding="utf-8") as f:
+            data_before = json_mod.load(f)
+        with open(json_path_after, "r", encoding="utf-8") as f:
+            data_after = json_mod.load(f)
+        assert len(data_before) == len(data_after)
+        for b, a in zip(data_before, data_after):
+            assert b["draft_id"] == a["draft_id"]
+            assert b["snapshot_status"] == a["snapshot_status"]
+            assert b["sealed"] == a["sealed"]
+            assert b["can_patch"] == a["can_patch"]
+            assert b["missing_fields"] == a["missing_fields"]
+
+        import csv as csv_mod
+        with open(draft_csv_before, "r", encoding="utf-8-sig") as f:
+            rows_before = list(csv_mod.DictReader(f))
+        with open(draft_csv_after, "r", encoding="utf-8-sig") as f:
+            rows_after = list(csv_mod.DictReader(f))
+        assert rows_before[0]["模板名称"] == rows_after[0]["模板名称"]
+        assert rows_before[0]["快照完整度"] == rows_after[0]["快照完整度"]
+        assert rows_before[0]["模板溯源备注"] == rows_after[0]["模板溯源备注"]
+
+        audit_reloaded = state2.get_audit_logs(action="snapshot_patch")
+        assert len(audit_reloaded) >= 1
+        success_logs = [l for l in audit_reloaded if l.result == "success"]
+        assert len(success_logs) >= 1
+
+        print("  [OK] 测试17通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_18_mixed_batch_precheck():
+    """测试18: 混合批次预检——已执行/未执行/老数据混合，预检一次说清"""
+    print("\n" + "=" * 60)
+    print("测试18: 混合批次预检")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-018"
+
+        defect1 = create_sample_defect(state, "DEF-MIX-001")
+        defect2 = create_sample_defect(state, "DEF-MIX-002", building="2号楼")
+        defect3 = create_sample_defect(state, "DEF-MIX-003", building="3号楼")
+
+        tpl_exists = create_template(
+            state, name="存在模板", target_status="dispatched", handler="辛"
+        )
+        tpl_deleted = create_template(
+            state, name="已删模板", target_status="false_positive", handler="壬"
+        )
+
+        draft_executed = create_draft_from_template(
+            state, template_id=tpl_exists.template_id,
+            source="DEF-MIX-001", source_type="ids"
+        )
+        execute_draft(state, draft_executed.draft_id)
+
+        draft_pending = create_draft_from_template(
+            state, template_id=tpl_exists.template_id,
+            source="DEF-MIX-002", source_type="ids"
+        )
+
+        draft_old = create_draft(
+            state, source="DEF-MIX-003", source_type="ids",
+            target_status="false_positive", name="老数据-模板已删"
+        )
+        draft_old.template_id = tpl_deleted.template_id
+        draft_old.template_snapshot = {}
+        state.update_draft(draft_old)
+        state.save_drafts()
+
+        delete_template(state, tpl_deleted.template_id)
+
+        health = snapshot_health_check(state)
+        id_to_h = {h["draft_id"]: h for h in health}
+
+        h_executed = id_to_h[draft_executed.draft_id]
+        h_pending = id_to_h[draft_pending.draft_id]
+        h_old = id_to_h[draft_old.draft_id]
+
+        print(f"  已执行草稿: can_patch={h_executed['can_patch']}, "
+              f"snapshot_status={h_executed['snapshot_status']}")
+        print(f"  未执行草稿: can_patch={h_pending['can_patch']}, "
+              f"snapshot_status={h_pending['snapshot_status']}")
+        print(f"  老数据草稿: can_patch={h_old['can_patch']}, "
+              f"reason={h_old['cannot_patch_reason']}, risk={h_old['risk_reason']}")
+
+        assert h_executed["can_patch"] is True
+        assert h_executed["snapshot_status"] == "complete"
+        assert h_pending["can_patch"] is True
+        assert h_pending["snapshot_status"] == "complete"
+        assert h_old["can_patch"] is False
+        assert h_old["snapshot_status"] == "missing"
+        assert "已删除" in h_old["cannot_patch_reason"]
+
+        csv_path = os.path.join(test_dir, "mixed_health.csv")
+        count = export_health_check_csv(health, csv_path)
+        assert count == 3
+
+        json_path = os.path.join(test_dir, "mixed_health.json")
+        count2 = export_health_check_json(health, json_path)
+        assert count2 == 3
+
+        import csv as csv_mod
+        with open(csv_path, "r", encoding="utf-8-sig") as f:
+            rows = list(csv_mod.DictReader(f))
+        id_to_row = {r["草稿ID"]: r for r in rows}
+        assert id_to_row[draft_old.draft_id]["可否补档"] == "否"
+        assert "已删除" in id_to_row[draft_old.draft_id]["不可补档原因"]
+
+        patch_result = snapshot_patch(state, [draft_executed.draft_id, draft_pending.draft_id])
+        assert len(patch_result["patched"]) == 2
+        assert patch_result["errors"] == []
+
+        print("  [OK] 测试18通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
 if __name__ == "__main__":
     import traceback
     error_file = Path(__file__).parent / "test_error.log"
@@ -784,6 +1254,12 @@ if __name__ == "__main__":
         test_10_template_delete_then_history_review()
         test_11_restart_consistency_for_all_tiers()
         test_12_classify_snapshot_unit()
+        test_13_snapshot_health_check()
+        test_14_snapshot_patch_and_seal()
+        test_15_patch_batch_conflict()
+        test_16_patch_immutability()
+        test_17_patch_restart_consistency()
+        test_18_mixed_batch_precheck()
 
         print("\n" + "=" * 60)
         print("[OK] 全部端到端测试通过！")

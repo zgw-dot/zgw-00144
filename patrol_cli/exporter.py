@@ -75,7 +75,11 @@ def _resolve_template_fields(state, draft) -> Dict[str, Any]:
     if snapshot_status == "complete":
         snap_target = STATUS_NAMES.get(tpl_snap.get("target_status", ""), tpl_snap.get("target_status", ""))
         snap_handler = tpl_snap.get("handler", "") or "-"
-        if not template_exists:
+        sealed = bool(getattr(draft, "snapshot_sealed_at", ""))
+        if sealed:
+            template_note = (f"完整快照(已封存): 模板={tpl_name}, 目标={snap_target}, "
+                             f"处理人={snap_handler}（不可变）")
+        elif not template_exists:
             template_note = (f"完整快照: 模板={tpl_name}, 目标={snap_target}, "
                              f"处理人={snap_handler}（模板已删除，快照已保留）")
         else:
@@ -94,7 +98,8 @@ def _resolve_template_fields(state, draft) -> Dict[str, Any]:
             template_note = "老数据，模板已删除且无快照"
 
     if snapshot_status == "complete":
-        snapshot_completeness_label = "完整快照"
+        sealed = bool(getattr(draft, "snapshot_sealed_at", ""))
+        snapshot_completeness_label = "完整快照(已封存)" if sealed else "完整快照"
     elif snapshot_status == "incomplete":
         snapshot_completeness_label = f"字段残缺(缺:{','.join(missing_fields)})"
     else:
@@ -644,4 +649,68 @@ def export_draft_list_csv(
             })
 
     return len(drafts)
+
+
+def export_health_check_csv(
+    results: list,
+    output_path: str
+) -> int:
+    """导出快照体检结果为 CSV"""
+    if not results:
+        return 0
+
+    fieldnames = [
+        "草稿ID", "草稿名称", "草稿状态", "模板ID", "模板是否存在",
+        "模板名称", "快照状态", "缺失字段", "是否已封存",
+        "可否补档", "不可补档原因", "风险原因"
+    ]
+
+    status_map = {
+        "pending": "待执行",
+        "executed": "已执行",
+        "voided": "已作废"
+    }
+    snap_map = {
+        "complete": "完整快照",
+        "incomplete": "残缺快照",
+        "missing": "老数据无快照"
+    }
+
+    with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for r in results:
+            writer.writerow({
+                "草稿ID": r["draft_id"],
+                "草稿名称": r["draft_name"],
+                "草稿状态": status_map.get(r["draft_status"], r["draft_status"]),
+                "模板ID": r["template_id"],
+                "模板是否存在": "是" if r["template_exists"] else "否",
+                "模板名称": r["template_name"],
+                "快照状态": snap_map.get(r["snapshot_status"], r["snapshot_status"]),
+                "缺失字段": ",".join(r["missing_fields"]) if r["missing_fields"] else "",
+                "是否已封存": "是" if r["sealed"] else "否",
+                "可否补档": "是" if r["can_patch"] else "否",
+                "不可补档原因": r["cannot_patch_reason"],
+                "风险原因": r["risk_reason"]
+            })
+
+    return len(results)
+
+
+def export_health_check_json(
+    results: list,
+    output_path: str
+) -> int:
+    """导出快照体检结果为 JSON"""
+    import json
+
+    if not results:
+        return 0
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+
+    return len(results)
 

@@ -12,10 +12,11 @@ from .workflow import (
     review_defect, undo_last, batch_review, WorkflowError,
     create_draft, preview_draft, execute_draft, void_draft,
     create_template, update_template, delete_template,
-    import_templates, export_templates, create_draft_from_template
+    import_templates, export_templates, create_draft_from_template,
+    snapshot_health_check, snapshot_patch
 )
 from .models import DRAFT_STATUS_NAMES
-from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv
+from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv, export_health_check_csv, export_health_check_json
 
 
 SNAPSHOT_KEY_FIELDS = [
@@ -112,6 +113,8 @@ def _resolve_draft_template_info(state, draft):
     if snapshot_status == "complete":
         if not info["template_exists"]:
             info["note"] = "模板已删除，但执行时的完整快照已保留"
+        if draft.snapshot_sealed_at:
+            info["note"] = "完整快照已封存，不可变（不受后续变更影响）"
     elif snapshot_status == "incomplete":
         missing_str = ",".join(missing_fields)
         if not info["template_exists"]:
@@ -1528,6 +1531,126 @@ def template_export(ctx, output_file, ids):
     except Exception as e:
         click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
         sys.exit(1)
+
+
+@cli.group()
+@click.pass_context
+def snapshot(ctx):
+    """快照体检与补档"""
+    pass
+
+
+@snapshot.command("check")
+@click.option("--output", "-o", default=None, help="导出文件路径（不指定则仅终端输出）")
+@click.option("--format", "fmt", type=click.Choice(["csv", "json"]), default="csv", help="导出格式")
+@click.pass_context
+def snapshot_check(ctx, output, fmt):
+    """快照体检：扫描所有草稿快照完整性，不修改任何状态"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    results = snapshot_health_check(state)
+
+    if not results:
+        click.echo("暂无草稿记录")
+        return
+
+    snap_map = {"complete": "完整快照", "incomplete": "残缺快照", "missing": "老数据无快照"}
+    status_map = {"pending": "待执行", "executed": "已执行", "voided": "已作废"}
+
+    complete_count = sum(1 for r in results if r["snapshot_status"] == "complete")
+    incomplete_count = sum(1 for r in results if r["snapshot_status"] == "incomplete")
+    missing_count = sum(1 for r in results if r["snapshot_status"] == "missing")
+    sealed_count = sum(1 for r in results if r["sealed"])
+    patchable_count = sum(1 for r in results if r["can_patch"])
+
+    click.echo(click.style("=== 快照体检报告 ===", bold=True))
+    click.echo(f"草稿总数: {len(results)}")
+    click.echo(f"  完整快照: {complete_count} (已封存: {sealed_count})")
+    click.echo(f"  残缺快照: {incomplete_count}")
+    click.echo(f"  老数据无快照: {missing_count}")
+    click.echo(f"  可补档: {patchable_count}")
+    click.echo()
+
+    for r in results:
+        ss = snap_map.get(r["snapshot_status"], r["snapshot_status"])
+        ds = status_map.get(r["draft_status"], r["draft_status"])
+        sealed_tag = " [已封存]" if r["sealed"] else ""
+        patch_tag = ""
+        if r["can_patch"]:
+            patch_tag = f" {_sym('check')}可补档"
+        elif r["cannot_patch_reason"]:
+            patch_tag = f" {_sym('cross')}{r['cannot_patch_reason']}"
+
+        click.echo(f"  {click.style(r['draft_id'], fg='cyan')} {r['draft_name']} [{ds}]")
+        click.echo(f"    快照: {ss}{sealed_tag}{patch_tag}")
+        if r["missing_fields"]:
+            click.echo(click.style(f"    缺失字段: {','.join(r['missing_fields'])}", fg="yellow"))
+        if r["risk_reason"]:
+            click.echo(click.style(f"    风险: {r['risk_reason']}", fg="yellow"))
+        click.echo()
+
+    if output:
+        if fmt == "csv":
+            count = export_health_check_csv(results, output)
+        else:
+            count = export_health_check_json(results, output)
+        click.echo(click.style(f"体检报告已导出: {output} ({count}条)", fg="green"))
+
+
+@snapshot.command("patch")
+@click.option("--ids", "draft_ids", default=None, help="逗号分隔的草稿ID列表，不指定则补档所有可补档草稿")
+@click.option("--dry-run", is_flag=True, help="仅预检，不落盘")
+@click.pass_context
+def snapshot_patch_cmd(ctx, draft_ids, dry_run):
+    """快照补档：封存模板快照为只读副本"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    if draft_ids:
+        target_ids = [x.strip() for x in draft_ids.split(",") if x.strip()]
+    else:
+        health = snapshot_health_check(state)
+        target_ids = [r["draft_id"] for r in health if r["can_patch"]]
+
+    if not target_ids:
+        click.echo(click.style("没有可补档的草稿", fg="yellow"))
+        return
+
+    health = snapshot_health_check(state)
+    id_to_health = {r["draft_id"]: r for r in health}
+
+    click.echo(click.style("=== 补档预检 ===", bold=True))
+    for did in target_ids:
+        h = id_to_health.get(did)
+        if h:
+            snap_map = {"complete": "完整快照", "incomplete": "残缺快照", "missing": "老数据无快照"}
+            ss = snap_map.get(h["snapshot_status"], h["snapshot_status"])
+            click.echo(f"  {did}: {h['draft_name']} - {ss}")
+            if h["can_patch"]:
+                click.echo(f"    {_sym('check')} 可补档")
+            else:
+                click.echo(click.style(f"    {_sym('cross')} {h['cannot_patch_reason']}", fg="red"))
+            if h["risk_reason"]:
+                click.echo(click.style(f"    风险: {h['risk_reason']}", fg="yellow"))
+    click.echo()
+
+    if dry_run:
+        click.echo(click.style("预检模式 (dry-run)，不执行补档", fg="cyan"))
+        return
+
+    result = snapshot_patch(state, target_ids)
+
+    if result["errors"]:
+        click.echo(click.style("补档失败（整批）:", fg="red", bold=True))
+        for err in result["errors"]:
+            click.echo(click.style(f"  {_sym('cross')} {err}", fg="red"))
+        click.echo(f"  审计ID: {result['audit_id']}")
+    else:
+        click.echo(click.style(f"补档成功: {len(result['patched'])} 条", fg="green", bold=True))
+        for did in result["patched"]:
+            draft = state.get_draft(did)
+            name = draft.name if draft else did
+            click.echo(f"  {_sym('check')} {did}: {name}")
+        click.echo(f"  审计ID: {result['audit_id']}")
 
 
 def main():

@@ -5,7 +5,7 @@ from typing import Optional, List, Tuple
 from .models import (
     DefectRecord, STATUS_NAMES, DEFECT_STATUSES, ReviewLogEntry, generate_log_id,
     DraftEntry, DraftItem, DraftExecutionResult, generate_draft_id,
-    DraftTemplate, generate_template_id
+    DraftTemplate, generate_template_id, AuditLogEntry, generate_audit_id
 )
 from .storage import PatrolState
 
@@ -1050,3 +1050,266 @@ def export_templates(
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     return len(templates)
+
+
+SNAPSHOT_KEY_FIELDS = [
+    ("name", "模板名称"),
+    ("target_status", "目标状态"),
+    ("handler", "处理人"),
+]
+
+
+def _classify_snapshot_for_check(tpl_snap):
+    if not tpl_snap:
+        return "missing", [label for _, label in SNAPSHOT_KEY_FIELDS]
+    missing = []
+    for key, label in SNAPSHOT_KEY_FIELDS:
+        if key not in tpl_snap:
+            missing.append(label)
+    if missing:
+        return "incomplete", missing
+    return "complete", []
+
+
+def snapshot_health_check(state: PatrolState) -> List[dict]:
+    """
+    快照体检：扫描所有草稿，对每条给出快照分类、缺失字段、可否补档及风险原因。
+    不修改任何状态。
+
+    返回 list[dict]，每条包含：
+        draft_id, draft_name, draft_status,
+        template_id, template_exists, template_name,
+        snapshot_status, missing_fields, sealed,
+        can_patch, cannot_patch_reason, risk_reason
+    """
+    results = []
+    for draft in state.drafts.values():
+        tpl_id = draft.template_id or ""
+        tpl_snap = draft.template_snapshot or {}
+        snapshot_status, missing_fields = _classify_snapshot_for_check(tpl_snap)
+        sealed = bool(draft.snapshot_sealed_at)
+        template_exists = False
+        template_name = ""
+        current_tpl = None
+
+        if tpl_id:
+            current_tpl = state.get_template(tpl_id)
+            template_exists = current_tpl is not None
+            if snapshot_status in ("complete", "incomplete"):
+                template_name = tpl_snap.get("name", "")
+            if not template_name and current_tpl:
+                template_name = current_tpl.name
+            if not template_name:
+                template_name = tpl_id
+
+        can_patch = False
+        cannot_patch_reason = ""
+        risk_reason = ""
+
+        if not tpl_id:
+            can_patch = False
+            cannot_patch_reason = "非模板草稿，无需补档"
+        elif sealed:
+            can_patch = False
+            cannot_patch_reason = "快照已封存，不可重复补档"
+        elif snapshot_status == "complete":
+            can_patch = True
+            cannot_patch_reason = ""
+        elif snapshot_status == "incomplete":
+            if template_exists:
+                can_patch = True
+            else:
+                can_patch = False
+                cannot_patch_reason = "残缺快照且模板已删除，无法补齐缺失字段"
+        else:
+            if template_exists:
+                can_patch = True
+            else:
+                can_patch = False
+                cannot_patch_reason = "无快照且模板已删除，无法补档"
+
+        if snapshot_status == "complete" and not sealed:
+            risk_reason = "快照完整但未封存，建议封存以确保不可变"
+        elif snapshot_status == "incomplete":
+            if template_exists:
+                conflict_fields = []
+                for key, label in SNAPSHOT_KEY_FIELDS:
+                    if key in tpl_snap and current_tpl is not None:
+                        snap_val = tpl_snap[key]
+                        cur_val = getattr(current_tpl, key, None)
+                        if snap_val and cur_val and snap_val != cur_val:
+                            conflict_fields.append(label)
+                if conflict_fields:
+                    risk_reason = f"快照与当前模板不一致: {','.join(conflict_fields)}，补档将用当前模板覆盖"
+                else:
+                    risk_reason = f"残缺快照(缺{','.join(missing_fields)})，可从当前模板补齐"
+            else:
+                risk_reason = "残缺快照且模板已删除，信息永久丢失"
+        elif snapshot_status == "missing":
+            if template_exists:
+                risk_reason = "老数据无快照，可从当前模板补档（快照反映当前模板状态，非创建时状态）"
+            else:
+                risk_reason = "老数据无快照且模板已删除，无法恢复"
+        elif sealed:
+            risk_reason = ""
+
+        results.append({
+            "draft_id": draft.draft_id,
+            "draft_name": draft.name,
+            "draft_status": draft.status,
+            "template_id": tpl_id,
+            "template_exists": template_exists,
+            "template_name": template_name,
+            "snapshot_status": snapshot_status,
+            "missing_fields": missing_fields,
+            "sealed": sealed,
+            "can_patch": can_patch,
+            "cannot_patch_reason": cannot_patch_reason,
+            "risk_reason": risk_reason,
+        })
+
+    results.sort(key=lambda r: r["draft_id"])
+    return results
+
+
+def _validate_patch_batch(
+    state: PatrolState,
+    draft_ids: List[str]
+) -> Tuple[List[str], List[str]]:
+    """
+    批次校验：检查重复记录、来源冲突、关键字段对不上。
+    返回 (patchable_ids, errors)。
+    任一错误则整批失败。
+    """
+    errors = []
+    seen = set()
+    for did in draft_ids:
+        if did in seen:
+            errors.append(f"{did}: 重复的草稿ID")
+            continue
+        seen.add(did)
+
+    for did in draft_ids:
+        draft = state.get_draft(did)
+        if not draft:
+            errors.append(f"{did}: 草稿不存在")
+            continue
+
+        if draft.snapshot_sealed_at:
+            errors.append(f"{did}: 快照已封存，不可重复补档")
+            continue
+
+        if not draft.template_id:
+            errors.append(f"{did}: 非模板草稿，无需补档")
+            continue
+
+        tpl_snap = draft.template_snapshot or {}
+        snapshot_status, _ = _classify_snapshot_for_check(tpl_snap)
+
+        current_tpl = state.get_template(draft.template_id)
+
+        if snapshot_status == "missing" and not current_tpl:
+            errors.append(f"{did}: 无快照且模板已删除，无法补档")
+            continue
+
+        if snapshot_status == "incomplete" and not current_tpl:
+            errors.append(f"{did}: 残缺快照且模板已删除，无法补齐")
+            continue
+
+        if snapshot_status == "incomplete" and current_tpl:
+            for key, label in SNAPSHOT_KEY_FIELDS:
+                if key in tpl_snap:
+                    snap_val = tpl_snap[key]
+                    cur_val = getattr(current_tpl, key, None)
+                    if snap_val and cur_val and snap_val != cur_val:
+                        errors.append(
+                            f"{did}: 来源冲突 - 快照{label}='{snap_val}'与当前模板{label}='{cur_val}'不一致"
+                        )
+
+    if errors:
+        return [], errors
+
+    health = snapshot_health_check(state)
+    id_to_health = {h["draft_id"]: h for h in health}
+
+    patchable = []
+    for did in draft_ids:
+        h = id_to_health.get(did)
+        if h and h["can_patch"]:
+            patchable.append(did)
+
+    return patchable, []
+
+
+def snapshot_patch(
+    state: PatrolState,
+    draft_ids: List[str]
+) -> dict:
+    """
+    快照补档：把当时模板封成只读副本写入 template_snapshot，并设置 snapshot_sealed_at。
+    先做批次校验，有冲突/重复/字段对不上则整批失败并记审计日志。
+
+    返回 dict:
+        patched: list[str] - 成功补档的 draft_id
+        errors: list[str] - 失败原因（整批失败时非空）
+        audit_id: str - 审计日志ID
+    """
+    now = datetime.now().isoformat()
+    audit_id = generate_audit_id()
+
+    patchable, errors = _validate_patch_batch(state, draft_ids)
+
+    if errors:
+        detail = "; ".join(errors)
+        audit_entry = AuditLogEntry(
+            audit_id=audit_id,
+            action="snapshot_patch",
+            target_type="batch",
+            target_id=",".join(draft_ids),
+            detail=detail,
+            result="failed",
+            timestamp=now
+        )
+        state.add_audit_log(audit_entry)
+        state.save_audit_logs()
+        return {
+            "patched": [],
+            "errors": errors,
+            "audit_id": audit_id
+        }
+
+    patched = []
+    for did in patchable:
+        draft = state.get_draft(did)
+        if not draft:
+            continue
+
+        current_tpl = state.get_template(draft.template_id)
+        if not current_tpl:
+            continue
+
+        draft.template_snapshot = current_tpl.to_dict()
+        draft.snapshot_sealed_at = now
+        state.update_draft(draft)
+        patched.append(did)
+
+    if patched:
+        detail = f"补档成功 {len(patched)} 条: {','.join(patched)}"
+        audit_entry = AuditLogEntry(
+            audit_id=audit_id,
+            action="snapshot_patch",
+            target_type="batch",
+            target_id=",".join(patched),
+            detail=detail,
+            result="success",
+            timestamp=now
+        )
+        state.add_audit_log(audit_entry)
+        state.save_drafts()
+        state.save_audit_logs()
+
+    return {
+        "patched": patched,
+        "errors": [],
+        "audit_id": audit_id
+    }

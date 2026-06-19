@@ -113,6 +113,11 @@ def generate_template_id() -> str:
     return f"TPL-{uuid.uuid4().hex[:10].upper()}"
 
 
+def generate_audit_id() -> str:
+    """生成审计日志 ID"""
+    return f"AUDIT-{uuid.uuid4().hex[:12].upper()}"
+
+
 DRAFT_STATUSES = ["pending", "executed", "voided"]
 DRAFT_STATUS_NAMES = {
     "pending": "待执行",
@@ -193,6 +198,7 @@ class DraftEntry:
     execution: DraftExecutionResult = field(default_factory=DraftExecutionResult)
     template_id: str = ""
     template_snapshot: Dict[str, Any] = field(default_factory=dict)
+    snapshot_sealed_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -209,7 +215,8 @@ class DraftEntry:
             "items": [item.to_dict() for item in self.items],
             "execution": self.execution.to_dict(),
             "template_id": self.template_id,
-            "template_snapshot": copy.deepcopy(self.template_snapshot)
+            "template_snapshot": copy.deepcopy(self.template_snapshot),
+            "snapshot_sealed_at": self.snapshot_sealed_at
         }
 
     @classmethod
@@ -234,7 +241,8 @@ class DraftEntry:
             items=items,
             execution=execution,
             template_id=data.get("template_id", ""),
-            template_snapshot=copy.deepcopy(data.get("template_snapshot", {}))
+            template_snapshot=copy.deepcopy(data.get("template_snapshot", {})),
+            snapshot_sealed_at=data.get("snapshot_sealed_at", "")
         )
 
 
@@ -294,4 +302,31 @@ class ReviewLogEntry:
             batch_id=data.get("batch_id", ""),
             parent_log_id=data.get("parent_log_id", ""),
             draft_id=data.get("draft_id", "")
+        )
+
+
+@dataclass
+class AuditLogEntry:
+    """审计日志条目"""
+    audit_id: str = ""
+    action: str = ""
+    target_type: str = ""
+    target_id: str = ""
+    detail: str = ""
+    result: str = ""
+    timestamp: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AuditLogEntry":
+        return cls(
+            audit_id=data.get("audit_id", ""),
+            action=data.get("action", ""),
+            target_type=data.get("target_type", ""),
+            target_id=data.get("target_id", ""),
+            detail=data.get("detail", ""),
+            result=data.get("result", ""),
+            timestamp=data.get("timestamp", "")
         )
