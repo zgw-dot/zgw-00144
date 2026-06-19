@@ -671,3 +671,126 @@ class ArchiveExportResult:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ArchiveExportResult":
         return cls(**data)
+
+
+FOLLOWUP_STATUSES = ["pending", "dispatched", "completed", "cancelled"]
+FOLLOWUP_STATUS_NAMES = {
+    "pending": "待签收",
+    "dispatched": "已签收",
+    "completed": "已完成",
+    "cancelled": "已撤销"
+}
+
+FOLLOWUP_ITEM_STATUSES = ["pending", "completed", "cancelled"]
+FOLLOWUP_ITEM_STATUS_NAMES = {
+    "pending": "待回访",
+    "completed": "已完成",
+    "cancelled": "已取消"
+}
+
+
+def generate_followup_id() -> str:
+    return f"FUP-{uuid.uuid4().hex[:12].upper()}"
+
+
+@dataclass
+class FollowUpPlanItem:
+    defect_id: str
+    defect_snapshot: Dict[str, Any] = field(default_factory=dict)
+    item_status: str = "pending"
+    result: str = ""
+    result_remark: str = ""
+    result_at: str = ""
+    result_by: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FollowUpPlanItem":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class FollowUpPlan:
+    plan_id: str = ""
+    name: str = ""
+    handler: str = ""
+    deadline: str = ""
+    remark: str = ""
+    created_at: str = ""
+    created_by: str = ""
+    status: str = "pending"
+    items: List[FollowUpPlanItem] = field(default_factory=list)
+    dispatched_at: str = ""
+    dispatched_by: str = ""
+    completed_at: str = ""
+    cancelled_at: str = ""
+    cancel_reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "name": self.name,
+            "handler": self.handler,
+            "deadline": self.deadline,
+            "remark": self.remark,
+            "created_at": self.created_at,
+            "created_by": self.created_by,
+            "status": self.status,
+            "items": [item.to_dict() for item in self.items],
+            "dispatched_at": self.dispatched_at,
+            "dispatched_by": self.dispatched_by,
+            "completed_at": self.completed_at,
+            "cancelled_at": self.cancelled_at,
+            "cancel_reason": self.cancel_reason
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FollowUpPlan":
+        items = [FollowUpPlanItem.from_dict(d) for d in data.get("items", [])]
+        return cls(
+            plan_id=data.get("plan_id", ""),
+            name=data.get("name", ""),
+            handler=data.get("handler", ""),
+            deadline=data.get("deadline", ""),
+            remark=data.get("remark", ""),
+            created_at=data.get("created_at", ""),
+            created_by=data.get("created_by", ""),
+            status=data.get("status", "pending"),
+            items=items,
+            dispatched_at=data.get("dispatched_at", ""),
+            dispatched_by=data.get("dispatched_by", ""),
+            completed_at=data.get("completed_at", ""),
+            cancelled_at=data.get("cancelled_at", ""),
+            cancel_reason=data.get("cancel_reason", "")
+        )
+
+
+@dataclass
+class FollowUpCreatePreview:
+    name: str = ""
+    handler: str = ""
+    deadline: str = ""
+    remark: str = ""
+    items: List[Dict[str, Any]] = field(default_factory=list)
+    conflicts: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    total_count: int = 0
+    can_create: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class FollowUpExportResult:
+    exported_plans: int = 0
+    output_file: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FollowUpExportResult":
+        return cls(**data)

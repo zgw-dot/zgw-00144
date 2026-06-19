@@ -21,6 +21,15 @@ from .workflow import (
     preview_restore_archive, restore_archive,
     export_archives, import_archives, precheck_archive_import
 )
+from .followup import (
+    FollowUpError,
+    preview_create_followup, create_followup_plan,
+    dispatch_followup_plan, complete_followup_plan, complete_followup_item,
+    cancel_followup_plan, get_followup_plan_detail, list_followup_plans,
+    export_followup_plans_json, export_followup_plans_csv,
+    import_followup_plans_json
+)
+from .models import FOLLOWUP_STATUS_NAMES, FOLLOWUP_ITEM_STATUS_NAMES
 from .models import DRAFT_STATUS_NAMES
 from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv, export_health_check_csv, export_health_check_json
 
@@ -2289,6 +2298,466 @@ def archive_import(ctx, json_file, strategy, dry_run):
         click.echo(f"审计ID: {result['audit_id']}")
 
     except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@cli.group()
+@click.pass_context
+def followup(ctx):
+    """整改回访计划管理"""
+    pass
+
+
+@followup.command("create")
+@click.option("--name", "-n", required=True, help="计划名称")
+@click.option("--ids", "defect_ids", default=None, help="逗号分隔的缺陷ID列表")
+@click.option("--building", "-b", default=None, help="按楼栋筛选")
+@click.option("--status", "-s", default=None,
+              type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
+              help="按缺陷状态筛选")
+@click.option("--handler", "-H", default="", help="回访人")
+@click.option("--remark", "-r", default="", help="备注")
+@click.option("--created-by", default="", help="创建人")
+@click.option("--deadline-hours", type=int, default=None,
+              help="回访时限（小时），覆盖规则配置")
+@click.option("--deadline", default=None, help="截止时间（ISO格式），直接指定")
+@click.option("--dry-run", is_flag=True, help="仅预览，不创建")
+@click.pass_context
+def followup_create(ctx, name, defect_ids, building, status, handler, remark,
+                    created_by, deadline_hours, deadline, dry_run):
+    """创建回访计划（按缺陷ID/楼栋/状态拉取）"""
+    config = ctx.obj["config"]
+    state = _get_state(ctx.obj["data_dir"])
+
+    ids_list = None
+    if defect_ids:
+        ids_list = [x.strip() for x in defect_ids.split(",") if x.strip()]
+
+    try:
+        preview = preview_create_followup(
+            state, config, name,
+            defect_ids=ids_list,
+            building=building,
+            status=status,
+            handler=handler,
+            remark=remark,
+            created_by=created_by,
+            deadline_override_hours=deadline_hours,
+            deadline_override=deadline,
+        )
+
+        if dry_run:
+            click.echo(click.style("=== 回访计划预览 (dry-run) ===", fg="cyan", bold=True))
+            click.echo(f"计划名称: {preview.name}")
+            if handler:
+                click.echo(f"回访人: {handler}")
+            if remark:
+                click.echo(f"备注: {remark}")
+            click.echo(f"将包含缺陷: {preview.total_count} 条")
+            click.echo()
+
+            if preview.conflicts:
+                click.echo(click.style(f"发现 {len(preview.conflicts)} 个冲突，无法创建:", fg="red", bold=True))
+                for c in preview.conflicts:
+                    click.echo(f"  {_sym('cross')} {c}")
+                click.echo()
+                click.echo(click.style("提示: 有冲突时整批不创建", fg="yellow"))
+            else:
+                click.echo(click.style(f"{_sym('check')} 无冲突，可创建", fg="green"))
+
+            if preview.items:
+                click.echo()
+                click.echo(click.style("包含的缺陷:", bold=True))
+                for item in preview.items:
+                    click.echo(f"  {item['defect_id']}: {item['building']} {item['device_id']} "
+                               f"[{item['current_status_name']}] {item['description'][:40]} "
+                               f"- 截止: {item['deadline'][:19]}")
+
+            click.echo()
+            click.echo(f"数据目录: {ctx.obj['data_dir']}")
+            return
+
+        plan = create_followup_plan(
+            state, config, name,
+            defect_ids=ids_list,
+            building=building,
+            status=status,
+            handler=handler,
+            remark=remark,
+            created_by=created_by,
+            deadline_override_hours=deadline_hours,
+            deadline_override=deadline,
+        )
+
+        click.echo(click.style(f"回访计划创建成功: {plan.plan_id}", fg="green", bold=True))
+        click.echo(f"  名称: {plan.name}")
+        if plan.handler:
+            click.echo(f"  回访人: {plan.handler}")
+        if plan.remark:
+            click.echo(f"  备注: {plan.remark}")
+        click.echo(f"  包含缺陷: {len(plan.items)} 条")
+        click.echo(f"  创建时间: {plan.created_at[:19]}")
+        if plan.deadline:
+            click.echo(f"  截止时间: {plan.deadline[:19]}")
+        status_name = FOLLOWUP_STATUS_NAMES.get(plan.status, plan.status)
+        click.echo(f"  状态: {status_name}")
+
+    except FollowUpError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@followup.command("preview")
+@click.option("--name", "-n", required=True, help="计划名称")
+@click.option("--ids", "defect_ids", default=None, help="逗号分隔的缺陷ID列表")
+@click.option("--building", "-b", default=None, help="按楼栋筛选")
+@click.option("--status", "-s", default=None,
+              type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
+              help="按缺陷状态筛选")
+@click.option("--handler", "-H", default="", help="回访人")
+@click.option("--remark", "-r", default="", help="备注")
+@click.option("--deadline-hours", type=int, default=None,
+              help="回访时限（小时），覆盖规则配置")
+@click.option("--deadline", default=None, help="截止时间（ISO格式），直接指定")
+@click.pass_context
+def followup_preview(ctx, name, defect_ids, building, status, handler, remark,
+                     deadline_hours, deadline):
+    """预览回访计划（等价于 create --dry-run）"""
+    ctx.invoke(followup_create, name=name, defect_ids=defect_ids, building=building,
+               status=status, handler=handler, remark=remark,
+               created_by="", deadline_hours=deadline_hours, deadline=deadline, dry_run=True)
+
+
+@followup.command("dispatch")
+@click.argument("plan_id")
+@click.option("--handler", "-H", default=None, help="指定签收人")
+@click.option("--dispatched-by", default="", help="操作人")
+@click.pass_context
+def followup_dispatch(ctx, plan_id, handler, dispatched_by):
+    """签收回访计划"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        plan = dispatch_followup_plan(
+            state, plan_id,
+            handler=handler or "",
+            dispatched_by=dispatched_by
+        )
+        status_name = FOLLOWUP_STATUS_NAMES.get(plan.status, plan.status)
+        click.echo(click.style(f"签收成功: {plan.name} ({plan.plan_id})", fg="green"))
+        click.echo(f"  状态: {status_name}")
+        if plan.handler:
+            click.echo(f"  回访人: {plan.handler}")
+        click.echo(f"  签收时间: {plan.dispatched_at[:19]}")
+    except FollowUpError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@followup.command("complete")
+@click.argument("plan_id")
+@click.option("--defect-id", "-d", default=None, help="完成单个缺陷的回访")
+@click.option("--result", default="", help="回访结果（单条时使用）")
+@click.option("--remark", "-r", default="", help="回访备注（单条时使用）")
+@click.option("--result-by", default="", help="回访操作人")
+@click.pass_context
+def followup_complete(ctx, plan_id, defect_id, result, remark, result_by):
+    """完成回访（整批或单条）"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        if defect_id:
+            plan = complete_followup_item(
+                state, plan_id, defect_id,
+                result=result,
+                result_remark=remark,
+                result_by=result_by
+            )
+            status_name = FOLLOWUP_STATUS_NAMES.get(plan.status, plan.status)
+            click.echo(click.style(f"回访完成: {defect_id}", fg="green"))
+            click.echo(f"  计划: {plan.name} ({plan.plan_id})")
+            click.echo(f"  计划状态: {status_name}")
+            if result:
+                click.echo(f"  结果: {result}")
+            if remark:
+                click.echo(f"  备注: {remark}")
+        else:
+            plan = complete_followup_plan(
+                state, plan_id,
+                results=None,
+                result_by=result_by
+            )
+            status_name = FOLLOWUP_STATUS_NAMES.get(plan.status, plan.status)
+            click.echo(click.style(f"计划完成: {plan.name} ({plan.plan_id})", fg="green", bold=True))
+            click.echo(f"  状态: {status_name}")
+            click.echo(f"  完成时间: {plan.completed_at[:19]}")
+            click.echo(f"  共 {len(plan.items)} 条回访记录")
+    except FollowUpError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@followup.command("cancel")
+@click.argument("plan_id")
+@click.option("--reason", "-r", default="", help="撤销原因")
+@click.pass_context
+def followup_cancel(ctx, plan_id, reason):
+    """撤销回访计划"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        plan = cancel_followup_plan(state, plan_id, reason=reason)
+        status_name = FOLLOWUP_STATUS_NAMES.get(plan.status, plan.status)
+        click.echo(click.style(f"计划已撤销: {plan.name} ({plan.plan_id})", fg="green"))
+        click.echo(f"  状态: {status_name}")
+        if reason:
+            click.echo(f"  原因: {reason}")
+        click.echo(f"  撤销时间: {plan.cancelled_at[:19]}")
+    except FollowUpError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@followup.command("list")
+@click.option("--status", "-s", default=None,
+              type=click.Choice(["pending", "dispatched", "completed", "cancelled"]),
+              help="按计划状态筛选")
+@click.option("--handler", "-H", default=None, help="按回访人筛选")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.pass_context
+def followup_list(ctx, status, handler, limit):
+    """列出回访计划"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    plans = list_followup_plans(
+        state,
+        status=status,
+        handler=handler,
+        limit=limit
+    )
+
+    if not plans:
+        click.echo("暂无回访计划")
+        return
+
+    click.echo(click.style(f"=== 回访计划列表 (共 {len(plans)} 条) ===", bold=True))
+    click.echo()
+
+    for i, plan in enumerate(plans, 1):
+        status_color = {
+            "pending": "yellow",
+            "dispatched": "cyan",
+            "completed": "green",
+            "cancelled": "bright_black"
+        }.get(plan["status"], "white")
+
+        click.echo(f"[{i}] {click.style(plan['plan_id'], fg='cyan')} "
+                   f"{click.style(plan['status_name'], fg=status_color)} "
+                   f"- {plan['name']}")
+        click.echo(f"    创建: {plan['created_at'][:19]}  "
+                   f"回访人: {plan['handler'] or '-'}  "
+                   f"条目: {plan['total_items']}条")
+        click.echo(f"    进度: 已完成{plan['completed_items']} "
+                   f"待回访{plan['pending_items']} "
+                   f"已取消{plan['cancelled_items']}")
+        if plan["deadline"]:
+            click.echo(f"    截止: {plan['deadline'][:19]}")
+        click.echo()
+
+    all_plans = state.list_followup_plans(status=status, handler=handler)
+    if len(all_plans) > limit:
+        click.echo(f"... 还有 {len(all_plans) - limit} 条，使用 -n 调整显示数量")
+
+
+@followup.command("show")
+@click.argument("plan_id")
+@click.pass_context
+def followup_show(ctx, plan_id):
+    """显示回访计划详情"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        detail = get_followup_plan_detail(state, plan_id)
+    except FollowUpError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    status_color = {
+        "pending": "yellow",
+        "dispatched": "cyan",
+        "completed": "green",
+        "cancelled": "bright_black"
+    }.get(detail["status"], "white")
+
+    click.echo(click.style(f"=== {detail['name']} ===", bold=True, fg="cyan"))
+    click.echo(f"计划ID: {detail['plan_id']}")
+    click.echo(f"状态: {click.style(detail['status_name'], fg=status_color)}")
+    if detail["handler"]:
+        click.echo(f"回访人: {detail['handler']}")
+    if detail["deadline"]:
+        click.echo(f"截止时间: {detail['deadline'][:19]}")
+    click.echo(f"创建时间: {detail['created_at'][:19]}")
+    if detail["created_by"]:
+        click.echo(f"创建人: {detail['created_by']}")
+    if detail["remark"]:
+        click.echo(f"备注: {detail['remark']}")
+
+    if detail["dispatched_at"]:
+        click.echo(f"签收时间: {detail['dispatched_at'][:19]}")
+        if detail["dispatched_by"]:
+            click.echo(f"签收人: {detail['dispatched_by']}")
+
+    if detail["completed_at"]:
+        click.echo(f"完成时间: {detail['completed_at'][:19]}")
+
+    if detail["cancelled_at"]:
+        click.echo(f"撤销时间: {detail['cancelled_at'][:19]}")
+        if detail["cancel_reason"]:
+            click.echo(f"撤销原因: {detail['cancel_reason']}")
+
+    click.echo()
+    click.echo(f"总计: {detail['total_items']} 条  "
+               f"已完成: {detail['completed_items']}  "
+               f"待回访: {detail['pending_items']}  "
+               f"已取消: {detail['cancelled_items']}")
+    click.echo()
+
+    click.echo(click.style("=== 回访明细 ===", bold=True))
+    for i, item in enumerate(detail["items"], 1):
+        item_status_color = {
+            "pending": "yellow",
+            "completed": "green",
+            "cancelled": "bright_black"
+        }.get(item["item_status"], "white")
+
+        click.echo(f"{i}. {click.style(item['defect_id'], fg='cyan')} "
+                   f"{click.style(item['item_status_name'], fg=item_status_color)} "
+                   f"- {item['snapshot_building']} {item['snapshot_device_id']}")
+        click.echo(f"   创建时状态: {item['snapshot_status_name']}  "
+                   f"当前状态: {item['current_status_name']}")
+        if item["snapshot_status"] != item["current_status"] and item["current_status"] != "(已删除)":
+            click.echo(click.style(f"   ⚠ 状态已变化", fg="yellow"))
+        click.echo(f"   严重等级: {item['snapshot_severity']}  "
+                   f"描述: {item['snapshot_description'][:40]}")
+        if item["result"]:
+            click.echo(f"   回访结果: {item['result']}")
+        if item["result_remark"]:
+            click.echo(f"   回访备注: {item['result_remark']}")
+        if item["result_at"]:
+            click.echo(f"   回访时间: {item['result_at'][:19]}")
+            if item["result_by"]:
+                click.echo(f"   回访人: {item['result_by']}")
+        click.echo()
+
+
+@followup.command("export")
+@click.argument("format", type=click.Choice(["json", "csv"]))
+@click.option("--output", "-o", default=None, help="输出文件路径")
+@click.option("--ids", default=None, help="逗号分隔的计划ID列表，不指定则导出全部")
+@click.pass_context
+def followup_export(ctx, format, output, ids):
+    """导出回访计划 (json / csv)"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    plan_ids = None
+    if ids:
+        plan_ids = [x.strip() for x in ids.split(",") if x.strip()]
+
+    if not output:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output = f"followup-{timestamp}.{format}"
+
+    try:
+        if format == "json":
+            count = export_followup_plans_json(state, output, plan_ids=plan_ids)
+        elif format == "csv":
+            count = export_followup_plans_csv(state, output, plan_ids=plan_ids)
+        else:
+            click.echo(click.style(f"不支持的格式: {format}", fg="red"), err=True)
+            sys.exit(1)
+
+        click.echo(click.style(f"导出成功: {output}", fg="green"))
+        click.echo(f"  记录数: {count}")
+    except Exception as e:
+        click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@followup.command("import")
+@click.argument("json_file", type=click.Path(exists=True))
+@click.option("--overwrite", is_flag=True, help="覆盖同ID的计划")
+@click.option("--dry-run", is_flag=True, help="仅预览，不导入")
+@click.pass_context
+def followup_import(ctx, json_file, overwrite, dry_run):
+    """从 JSON 文件导入回访计划"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    if dry_run:
+        import json
+        from pathlib import Path
+
+        path = Path(json_file)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict):
+                plans_data = list(data.values())
+            elif isinstance(data, list):
+                plans_data = data
+            else:
+                click.echo(click.style("错误: JSON 格式不正确", fg="red"), err=True)
+                sys.exit(1)
+
+            click.echo(click.style("=== 导入预览 (dry-run) ===", fg="cyan", bold=True))
+            click.echo(f"文件: {json_file}")
+            click.echo(f"待导入计划: {len(plans_data)} 个")
+
+            existing = 0
+            new = 0
+            for pdata in plans_data:
+                pid = pdata.get("plan_id", "")
+                if pid and state.get_followup_plan(pid):
+                    existing += 1
+                else:
+                    new += 1
+
+            click.echo(f"  新增: {new} 个")
+            click.echo(f"  已存在: {existing} 个")
+            if existing > 0 and not overwrite:
+                click.echo(click.style(f"  提示: 使用 --overwrite 覆盖已存在的计划", fg="yellow"))
+        except Exception as e:
+            click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+            sys.exit(1)
+        return
+
+    try:
+        result = import_followup_plans_json(state, json_file, overwrite=overwrite)
+
+        click.echo(click.style("=== 导入结果 ===", bold=True))
+        click.echo(f"文件: {json_file}")
+        click.echo()
+
+        if result["imported"]:
+            click.echo(click.style(f"成功导入 {result['imported_count']} 个:", fg="green"))
+            for name in result["imported"]:
+                click.echo(f"  {_sym('check')} {name}")
+            click.echo()
+
+        if result["skipped"]:
+            click.echo(click.style(f"跳过 {result['skipped_count']} 个:", fg="yellow"))
+            for name in result["skipped"]:
+                click.echo(f"  {_sym('warn')} {name}")
+            click.echo()
+
+        if result["errors"]:
+            click.echo(click.style(f"错误 {result['error_count']} 个:", fg="red"))
+            for err in result["errors"]:
+                click.echo(f"  {_sym('cross')} {err}")
+            click.echo()
+
+    except FollowUpError as e:
         click.echo(click.style(f"错误: {e}", fg="red"), err=True)
         sys.exit(1)
 

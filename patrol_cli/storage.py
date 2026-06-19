@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry, TemplateVersion, TemplateArchive
+from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry, TemplateVersion, TemplateArchive, FollowUpPlan
 
 
 class PatrolState:
@@ -25,6 +25,7 @@ class PatrolState:
         self.audit_log_file = self.data_dir / "audit_log.json"
         self.versions_file = self.data_dir / "versions.json"
         self.archives_file = self.data_dir / "archives.json"
+        self.followup_plans_file = self.data_dir / "followup_plans.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
@@ -37,6 +38,7 @@ class PatrolState:
         self.audit_logs: List[AuditLogEntry] = []
         self.versions: Dict[str, TemplateVersion] = {}
         self.archives: Dict[str, TemplateArchive] = {}
+        self.followup_plans: Dict[str, FollowUpPlan] = {}
 
         self._load()
 
@@ -102,6 +104,13 @@ class PatrolState:
                 for arc_id, arc_data in archives_data.items():
                     self.archives[arc_id] = TemplateArchive.from_dict(arc_data)
 
+        if self.followup_plans_file.exists():
+            with open(self.followup_plans_file, "r", encoding="utf-8") as f:
+                followup_data = json.load(f)
+                self.followup_plans = {}
+                for plan_id, plan_data in followup_data.items():
+                    self.followup_plans[plan_id] = FollowUpPlan.from_dict(plan_data)
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -129,6 +138,7 @@ class PatrolState:
         self.save_audit_logs()
         self.save_versions()
         self.save_archives()
+        self.save_followup_plans()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -492,3 +502,53 @@ class PatrolState:
             archives = [a for a in archives if a.template_name == template_name]
         archives.sort(key=lambda a: a.archived_at, reverse=True)
         return archives
+
+    def save_followup_plans(self):
+        plans_data = {
+            plan_id: plan.to_dict()
+            for plan_id, plan in self.followup_plans.items()
+        }
+        with open(self.followup_plans_file, "w", encoding="utf-8") as f:
+            json.dump(plans_data, f, ensure_ascii=False, indent=2)
+
+    def add_followup_plan(self, plan: FollowUpPlan):
+        self.followup_plans[plan.plan_id] = plan
+
+    def get_followup_plan(self, plan_id: str) -> Optional[FollowUpPlan]:
+        return self.followup_plans.get(plan_id)
+
+    def update_followup_plan(self, plan: FollowUpPlan):
+        if plan.plan_id in self.followup_plans:
+            self.followup_plans[plan.plan_id] = plan
+
+    def delete_followup_plan(self, plan_id: str) -> bool:
+        if plan_id in self.followup_plans:
+            del self.followup_plans[plan_id]
+            return True
+        return False
+
+    def list_followup_plans(
+        self,
+        status: Optional[str] = None,
+        handler: Optional[str] = None,
+        limit: int = 0
+    ) -> List[FollowUpPlan]:
+        plans = list(self.followup_plans.values())
+        plans.sort(key=lambda p: p.created_at, reverse=True)
+        if status:
+            plans = [p for p in plans if p.status == status]
+        if handler:
+            plans = [p for p in plans if p.handler == handler]
+        if limit > 0:
+            plans = plans[:limit]
+        return plans
+
+    def get_followup_plans_for_defect(self, defect_id: str, active_only: bool = True) -> List[FollowUpPlan]:
+        result = []
+        for plan in self.followup_plans.values():
+            if active_only and plan.status not in ("pending", "dispatched"):
+                continue
+            if any(item.defect_id == defect_id for item in plan.items):
+                result.append(plan)
+        result.sort(key=lambda p: p.created_at, reverse=True)
+        return result
