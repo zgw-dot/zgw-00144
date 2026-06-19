@@ -513,6 +513,8 @@ def preview_draft(
         "remark": draft.remark,
         "created_at": draft.created_at,
         "total_items": len(draft.items),
+        "template_id": draft.template_id,
+        "template_snapshot": draft.template_snapshot,
         "will_change": will_change,
         "same_status": same_status,
         "invalid_transition": invalid_transition,

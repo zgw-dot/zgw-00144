@@ -9,6 +9,46 @@ from .config import RulesConfig
 from .storage import PatrolState
 
 
+def _resolve_template_fields(state, draft):
+    """
+    统一解析导出用的模板字段。
+    返回 (template_id, template_name, template_note)
+    """
+    tpl_id = getattr(draft, "template_id", "") or ""
+    tpl_snap = getattr(draft, "template_snapshot", None) or {}
+    has_snapshot = bool(tpl_snap)
+    tpl_name = ""
+    tpl_note = ""
+
+    if not tpl_id:
+        return "", "未使用模板", "手动创建"
+
+    current_tpl = state.get_template(tpl_id) if state and hasattr(state, "get_template") else None
+    template_exists = current_tpl is not None
+
+    if has_snapshot:
+        tpl_name = tpl_snap.get("name", "")
+
+    if not tpl_name and template_exists:
+        tpl_name = current_tpl.name
+
+    if not tpl_name:
+        tpl_name = tpl_id
+
+    if has_snapshot:
+        if not template_exists:
+            tpl_note = "模板已删除，但快照已保留"
+        else:
+            tpl_note = "已保存快照（不受模板后续变更影响）"
+    else:
+        if template_exists:
+            tpl_note = "老数据，未保存模板快照（模板后续变更可能影响溯源）"
+        else:
+            tpl_note = "老数据，模板已删除且无快照"
+
+    return tpl_id, tpl_name, tpl_note
+
+
 def export_csv(
     state: PatrolState,
     output_path: str,
@@ -443,7 +483,7 @@ def export_draft_csv(
     fieldnames = [
         "草稿ID", "草稿名称", "目标状态", "处理人", "备注",
         "创建时间", "执行时间", "撤销时间",
-        "模板ID", "模板名称",
+        "模板ID", "模板名称", "模板溯源备注",
         "缺陷ID", "楼栋", "设备编号", "设备类别", "缺陷类型",
         "严重等级", "快照状态", "当前状态", "描述"
     ]
@@ -455,9 +495,7 @@ def export_draft_csv(
         target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
         undo_time = draft.execution.undo_at[:19] if draft.execution.undo_at else ""
 
-        template_name = ""
-        if draft.template_snapshot:
-            template_name = draft.template_snapshot.get("name", "")
+        tpl_id, tpl_name, tpl_note = _resolve_template_fields(state, draft)
 
         for item in draft.items:
             snapshot = item.defect_snapshot
@@ -477,8 +515,9 @@ def export_draft_csv(
                 "创建时间": draft.created_at[:19],
                 "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
                 "撤销时间": undo_time,
-                "模板ID": draft.template_id,
-                "模板名称": template_name,
+                "模板ID": tpl_id,
+                "模板名称": tpl_name,
+                "模板溯源备注": tpl_note,
                 "缺陷ID": item.defect_id,
                 "楼栋": snapshot.get("building", ""),
                 "设备编号": snapshot.get("device_id", ""),
@@ -508,7 +547,7 @@ def export_draft_list_csv(
         "草稿ID", "草稿名称", "状态", "来源类型", "来源引用",
         "目标状态", "处理人", "备注", "创建人", "创建时间",
         "条目数", "执行时间", "撤销时间", "成功条数",
-        "模板ID", "模板名称"
+        "模板ID", "模板名称", "模板溯源备注"
     ]
 
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
@@ -519,9 +558,7 @@ def export_draft_list_csv(
             status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
             target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
 
-            template_name = ""
-            if draft.template_snapshot:
-                template_name = draft.template_snapshot.get("name", "")
+            tpl_id, tpl_name, tpl_note = _resolve_template_fields(state, draft)
 
             writer.writerow({
                 "草稿ID": draft.draft_id,
@@ -538,8 +575,9 @@ def export_draft_list_csv(
                 "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
                 "撤销时间": draft.execution.undo_at[:19] if draft.execution.undo_at else "",
                 "成功条数": draft.execution.success_count if draft.execution.success_count else 0,
-                "模板ID": draft.template_id,
-                "模板名称": template_name
+                "模板ID": tpl_id,
+                "模板名称": tpl_name,
+                "模板溯源备注": tpl_note
             })
 
     return len(drafts)

@@ -18,6 +18,75 @@ from .models import DRAFT_STATUS_NAMES
 from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv
 
 
+def _resolve_draft_template_info(state, draft):
+    """
+    统一解析草稿的模板来源信息。
+
+    返回 dict:
+        has_template: bool  - 是否关联了模板
+        template_id: str    - 模板ID（可能为空字符串）
+        template_name: str  - 模板名称（优先快照，其次当前模板，再次ID）
+        template_exists: bool - 模板在当前存储中是否仍存在
+        has_snapshot: bool  - 是否保存了模板快照
+        snapshot_target_status: str - 快照中的目标状态（中文名）
+        snapshot_handler: str
+        snapshot_remark: str
+        note: str          - 补充提示（老数据、模板已删除、快照缺失等）
+    """
+    info = {
+        "has_template": False,
+        "template_id": "",
+        "template_name": "",
+        "template_exists": False,
+        "has_snapshot": False,
+        "snapshot_target_status": "",
+        "snapshot_handler": "",
+        "snapshot_remark": "",
+        "note": "",
+    }
+
+    tpl_id = getattr(draft, "template_id", "") or ""
+    info["template_id"] = tpl_id
+
+    if not tpl_id:
+        return info
+
+    info["has_template"] = True
+
+    snap = getattr(draft, "template_snapshot", None) or {}
+    info["has_snapshot"] = bool(snap)
+
+    if snap:
+        snap_name = snap.get("name", "")
+        snap_status = snap.get("target_status", "")
+        info["template_name"] = snap_name
+        info["snapshot_target_status"] = STATUS_NAMES.get(snap_status, snap_status)
+        info["snapshot_handler"] = snap.get("handler", "") or "-"
+        info["snapshot_remark"] = snap.get("remark", "") or "-"
+
+    tpl = state.get_template(tpl_id) if hasattr(state, "get_template") else None
+    info["template_exists"] = tpl is not None
+
+    if tpl and not info["template_name"]:
+        info["template_name"] = tpl.name
+
+    if not info["template_name"]:
+        info["template_name"] = tpl_id
+
+    if info["has_snapshot"]:
+        if not info["template_exists"]:
+            info["note"] = "模板已删除，但执行时的快照已保留"
+        else:
+            info["note"] = ""
+    else:
+        if info["template_exists"]:
+            info["note"] = "老数据，未保存模板快照（模板后续变更可能影响溯源）"
+        else:
+            info["note"] = "老数据，模板已删除且无快照"
+
+    return info
+
+
 DEFAULT_CONFIG = "examples/rules.yaml"
 DEFAULT_DATA_DIR = "data"
 
@@ -348,7 +417,14 @@ def review_log_cmd(ctx, limit, defect_id, handler, log_type):
             if log.draft_id:
                 draft = state.get_draft(log.draft_id)
                 draft_name = draft.name if draft else log.draft_id
-                click.echo(f"    草稿: {log.draft_id} ({draft_name})")
+                draft_tpl_info = ""
+                if draft:
+                    tpl_info = _resolve_draft_template_info(state, draft)
+                    if tpl_info["has_template"]:
+                        draft_tpl_info = f" [模板: {tpl_info['template_name']}]"
+                    else:
+                        draft_tpl_info = " [未使用模板]"
+                click.echo(f"    草稿: {log.draft_id} ({draft_name}){draft_tpl_info}")
         click.echo()
 
     total_all = len(state.review_logs)
@@ -644,6 +720,29 @@ def draft_preview(ctx, draft_id):
         status_name = STATUS_NAMES.get(preview["target_status"], preview["target_status"])
         click.echo(click.style(f"=== 草稿预览: {preview['name']} ===", bold=True, fg="cyan"))
         click.echo(f"草稿ID: {preview['draft_id']}")
+
+        preview_tpl_id = preview.get("template_id", "")
+        preview_tpl_snap = preview.get("template_snapshot", {})
+        if preview_tpl_id:
+            tpl = state.get_template(preview_tpl_id)
+            if preview_tpl_snap:
+                tpl_name = preview_tpl_snap.get("name", preview_tpl_id)
+                click.echo(f"模板: {tpl_name} ({preview_tpl_id})")
+                snap_status = preview_tpl_snap.get("target_status", "")
+                snap_status_name = STATUS_NAMES.get(snap_status, snap_status)
+                click.echo(f"     快照目标状态: {snap_status_name}  "
+                           f"处理人: {preview_tpl_snap.get('handler','-')}")
+                if not tpl:
+                    click.echo(click.style(f"     [当前模板已删除，快照已保留]", fg="yellow"))
+            elif tpl:
+                click.echo(f"模板: {tpl.name} ({preview_tpl_id})")
+                click.echo(click.style(f"     [老数据，未保存模板快照]", fg="yellow"))
+            else:
+                click.echo(f"模板: {preview_tpl_id}")
+                click.echo(click.style(f"     [老数据，模板已删除且无快照]", fg="yellow"))
+        else:
+            click.echo("模板: 未使用模板（手动创建）")
+
         click.echo(f"目标状态: {status_name}")
         click.echo(f"创建时间: {preview['created_at'][:19]}")
         click.echo(f"总条目数: {preview['total_items']}")
@@ -705,6 +804,18 @@ def draft_execute(ctx, draft_id):
                 f"草稿执行成功: {draft.name} ({draft_id})",
                 fg="green", bold=True
             ))
+
+            tpl_info = _resolve_draft_template_info(state, draft)
+            if tpl_info["has_template"]:
+                click.echo(f"  使用模板: {tpl_info['template_name']} ({tpl_info['template_id']})")
+                if tpl_info["has_snapshot"]:
+                    click.echo(f"  模板快照: 已保存（目标状态={tpl_info['snapshot_target_status']}, "
+                               f"处理人={tpl_info['snapshot_handler']}）")
+                if tpl_info["note"]:
+                    click.echo(click.style(f"  提示: {tpl_info['note']}", fg="yellow"))
+            else:
+                click.echo(f"  模板来源: 未使用模板（手动创建）")
+
             click.echo(f"  执行批次: {result.execution_id}")
             click.echo(f"  执行时间: {result.executed_at[:19]}")
             click.echo(f"  成功处理: {result.success_count} 条 → {status_name}")
@@ -750,15 +861,18 @@ def draft_list(ctx, status, limit):
                    f"条目: {len(draft.items)}条")
         if draft.handler:
             click.echo(f"    处理人: {draft.handler}")
-        if draft.template_id:
-            tpl = state.get_template(draft.template_id)
-            tpl_name = tpl.name if tpl else draft.template_id
-            if tpl:
-                click.echo(f"    模板: {tpl_name} ({draft.template_id})")
-            else:
-                snap = draft.template_snapshot
-                snap_name = snap.get("name", draft.template_id) if snap else draft.template_id
-                click.echo(f"    模板: {snap_name} ({draft.template_id}) [模板已删除]")
+
+        tpl_info = _resolve_draft_template_info(state, draft)
+        if tpl_info["has_template"]:
+            tpl_line = f"    模板: {tpl_info['template_name']} ({tpl_info['template_id']})"
+            if not tpl_info["template_exists"]:
+                tpl_line += " [模板已删除]"
+            elif not tpl_info["has_snapshot"]:
+                tpl_line += " [老数据无快照]"
+            click.echo(tpl_line)
+        else:
+            click.echo("    模板: 未使用模板（手动创建）")
+
         if draft.status == "executed" and draft.execution.executed_at:
             click.echo(f"    执行时间: {draft.execution.executed_at[:19]}  "
                        f"成功: {draft.execution.success_count}条")
@@ -798,20 +912,26 @@ def draft_show(ctx, draft_id):
     click.echo(f"草稿ID: {draft.draft_id}")
     click.echo(f"状态: {click.style(status_name, fg=status_color)}")
     click.echo(f"来源: {draft.source_type} - {draft.source_ref}")
-    if draft.template_id:
-        tpl = state.get_template(draft.template_id)
-        if tpl:
-            click.echo(f"模板: {tpl.name} ({draft.template_id})")
-        else:
-            snap = draft.template_snapshot
-            snap_name = snap.get("name", draft.template_id) if snap else draft.template_id
-            click.echo(f"模板: {snap_name} ({draft.template_id})")
-            click.echo(f"     [模板已删除，使用时的快照已保留]")
-        if draft.template_snapshot:
-            snap = draft.template_snapshot
-            click.echo(f"模板快照: 目标状态={STATUS_NAMES.get(snap.get('target_status',''), snap.get('target_status',''))}  "
-                       f"处理人={snap.get('handler','-')}  "
-                       f"备注={snap.get('remark','-')[:20]}")
+
+    tpl_info = _resolve_draft_template_info(state, draft)
+    if tpl_info["has_template"]:
+        click.echo(f"模板: {tpl_info['template_name']} ({tpl_info['template_id']})")
+        if tpl_info["has_snapshot"]:
+            click.echo(f"     快照保存时间点的配置已保留，不受模板后续修改影响")
+            click.echo(f"     快照目标状态: {tpl_info['snapshot_target_status']}")
+            click.echo(f"     快照处理人: {tpl_info['snapshot_handler']}")
+            if tpl_info["snapshot_remark"] and tpl_info["snapshot_remark"] != "-":
+                remark_display = tpl_info["snapshot_remark"]
+                if len(remark_display) > 30:
+                    remark_display = remark_display[:30] + "..."
+                click.echo(f"     快照备注: {remark_display}")
+        if not tpl_info["template_exists"]:
+            click.echo(click.style(f"     [当前模板已删除]", fg="yellow"))
+        if tpl_info["note"]:
+            click.echo(click.style(f"     提示: {tpl_info['note']}", fg="yellow"))
+    else:
+        click.echo("模板: 未使用模板（手动创建）")
+
     click.echo(f"目标状态: {target_status_name}")
     click.echo(f"创建时间: {draft.created_at[:19]}")
     if draft.created_by:
@@ -983,7 +1103,14 @@ def show(ctx, defect_id):
             if log.draft_id:
                 draft = state.get_draft(log.draft_id)
                 draft_name = draft.name if draft else log.draft_id
-                click.echo(f"      草稿来源: {log.draft_id} ({draft_name})")
+                draft_tpl_info = ""
+                if draft:
+                    tpl_info = _resolve_draft_template_info(state, draft)
+                    if tpl_info["has_template"]:
+                        draft_tpl_info = f" [模板: {tpl_info['template_name']}]"
+                    else:
+                        draft_tpl_info = " [未使用模板]"
+                click.echo(f"      草稿来源: {log.draft_id} ({draft_name}){draft_tpl_info}")
 
     drafts_for_defect = state.get_drafts_for_defect(defect_id)
     if drafts_for_defect:
@@ -1000,6 +1127,11 @@ def show(ctx, defect_id):
             click.echo(f"  [{i}] {click.style(draft.draft_id, fg='cyan')} "
                        f"{click.style(status_name, fg=status_color)} "
                        f"- {draft.name}")
+            tpl_info = _resolve_draft_template_info(state, draft)
+            if tpl_info["has_template"]:
+                click.echo(f"      模板: {tpl_info['template_name']} ({tpl_info['template_id']})")
+            else:
+                click.echo(f"      模板: 未使用模板（手动创建）")
             click.echo(f"      创建: {draft.created_at[:19]}  目标: {target_status}")
             if draft.status == "executed":
                 if draft.execution.undo_at:
