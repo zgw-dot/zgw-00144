@@ -10,7 +10,9 @@ from .models import STATUS_NAMES
 from .merger import import_and_merge, preview_import
 from .workflow import (
     review_defect, undo_last, batch_review, WorkflowError,
-    create_draft, preview_draft, execute_draft, void_draft
+    create_draft, preview_draft, execute_draft, void_draft,
+    create_template, update_template, delete_template,
+    import_templates, export_templates, create_draft_from_template
 )
 from .models import DRAFT_STATUS_NAMES
 from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv
@@ -539,15 +541,16 @@ def draft(ctx):
 @draft.command("create")
 @click.option("--ids", "defect_ids", default=None, help="逗号分隔的缺陷ID列表")
 @click.option("--csv", "csv_path", type=click.Path(exists=True), default=None, help="CSV文件路径")
-@click.option("--status", "-s", required=True,
+@click.option("--status", "-s", default=None,
               type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
-              help="目标状态")
+              help="目标状态（使用模板时可省略）")
 @click.option("--name", "-n", default="", help="草稿名称")
-@click.option("--handler", "-H", default="", help="处理人")
-@click.option("--remark", "-r", default="", help="备注")
+@click.option("--handler", "-H", default=None, help="处理人")
+@click.option("--remark", "-r", default=None, help="备注")
 @click.option("--created-by", default="", help="创建人")
+@click.option("--template", "-t", "template_id", default=None, help="使用的模板ID或名称")
 @click.pass_context
-def draft_create(ctx, defect_ids, csv_path, status, name, handler, remark, created_by):
+def draft_create(ctx, defect_ids, csv_path, status, name, handler, remark, created_by, template_id):
     """创建复核方案草稿"""
     state = _get_state(ctx.obj["data_dir"])
 
@@ -559,27 +562,69 @@ def draft_create(ctx, defect_ids, csv_path, status, name, handler, remark, creat
         click.echo(click.style("错误: --ids 和 --csv 不能同时使用", fg="red"), err=True)
         sys.exit(1)
 
+    if template_id and not status:
+        pass
+    elif not template_id and not status:
+        click.echo(click.style("错误: 必须指定 --status 或 --template", fg="red"), err=True)
+        sys.exit(1)
+
     try:
-        if csv_path:
-            draft = create_draft(
-                state, csv_path, "csv", status,
-                name=name, handler=handler, remark=remark, created_by=created_by
+        if template_id:
+            template = state.get_template(template_id)
+            if not template:
+                template = state.get_template_by_name(template_id)
+            if not template:
+                click.echo(click.style(f"错误: 模板不存在: {template_id}", fg="red"), err=True)
+                sys.exit(1)
+            template_id = template.template_id
+
+            source = csv_path if csv_path else defect_ids
+            source_type = "csv" if csv_path else "ids"
+
+            handler_val = handler if handler is not None else ""
+            remark_val = remark if remark is not None else ""
+
+            draft = create_draft_from_template(
+                state,
+                template_id=template_id,
+                source=source,
+                source_type=source_type,
+                name=name,
+                status=status or "",
+                handler=handler_val,
+                remark=remark_val,
+                created_by=created_by
             )
         else:
-            draft = create_draft(
-                state, defect_ids, "ids", status,
-                name=name, handler=handler, remark=remark, created_by=created_by
-            )
+            handler_val = handler if handler is not None else ""
+            remark_val = remark if remark is not None else ""
 
-        status_name = STATUS_NAMES.get(status, status)
+            if csv_path:
+                draft = create_draft(
+                    state, csv_path, "csv", status,
+                    name=name, handler=handler_val, remark=remark_val, created_by=created_by
+                )
+            else:
+                draft = create_draft(
+                    state, defect_ids, "ids", status,
+                    name=name, handler=handler_val, remark=remark_val, created_by=created_by
+                )
+
+        status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
         click.echo(click.style(f"草稿创建成功: {draft.draft_id}", fg="green"))
         click.echo(f"  名称: {draft.name}")
         click.echo(f"  目标状态: {status_name}")
         click.echo(f"  包含缺陷: {len(draft.items)} 条")
-        if handler:
-            click.echo(f"  处理人: {handler}")
-        if remark:
-            click.echo(f"  备注: {remark}")
+        if draft.handler:
+            click.echo(f"  处理人: {draft.handler}")
+        if draft.remark:
+            click.echo(f"  备注: {draft.remark}")
+        if draft.template_id:
+            tpl = state.get_template(draft.template_id)
+            tpl_name = tpl.name if tpl else draft.template_id
+            click.echo(f"  模板来源: {tpl_name} ({draft.template_id})")
+            if draft.template_snapshot:
+                click.echo(f"  模板快照: 已保存（修改模板不影响此草稿）")
         click.echo(f"  创建时间: {draft.created_at[:19]}")
     except WorkflowError as e:
         click.echo(click.style(f"错误: {e}", fg="red"), err=True)
@@ -705,6 +750,15 @@ def draft_list(ctx, status, limit):
                    f"条目: {len(draft.items)}条")
         if draft.handler:
             click.echo(f"    处理人: {draft.handler}")
+        if draft.template_id:
+            tpl = state.get_template(draft.template_id)
+            tpl_name = tpl.name if tpl else draft.template_id
+            if tpl:
+                click.echo(f"    模板: {tpl_name} ({draft.template_id})")
+            else:
+                snap = draft.template_snapshot
+                snap_name = snap.get("name", draft.template_id) if snap else draft.template_id
+                click.echo(f"    模板: {snap_name} ({draft.template_id}) [模板已删除]")
         if draft.status == "executed" and draft.execution.executed_at:
             click.echo(f"    执行时间: {draft.execution.executed_at[:19]}  "
                        f"成功: {draft.execution.success_count}条")
@@ -744,6 +798,20 @@ def draft_show(ctx, draft_id):
     click.echo(f"草稿ID: {draft.draft_id}")
     click.echo(f"状态: {click.style(status_name, fg=status_color)}")
     click.echo(f"来源: {draft.source_type} - {draft.source_ref}")
+    if draft.template_id:
+        tpl = state.get_template(draft.template_id)
+        if tpl:
+            click.echo(f"模板: {tpl.name} ({draft.template_id})")
+        else:
+            snap = draft.template_snapshot
+            snap_name = snap.get("name", draft.template_id) if snap else draft.template_id
+            click.echo(f"模板: {snap_name} ({draft.template_id})")
+            click.echo(f"     [模板已删除，使用时的快照已保留]")
+        if draft.template_snapshot:
+            snap = draft.template_snapshot
+            click.echo(f"模板快照: 目标状态={STATUS_NAMES.get(snap.get('target_status',''), snap.get('target_status',''))}  "
+                       f"处理人={snap.get('handler','-')}  "
+                       f"备注={snap.get('remark','-')[:20]}")
     click.echo(f"目标状态: {target_status_name}")
     click.echo(f"创建时间: {draft.created_at[:19]}")
     if draft.created_by:
@@ -938,6 +1006,268 @@ def show(ctx, defect_id):
                     click.echo(f"      执行: {draft.execution.executed_at[:19]} (已撤销)")
                 else:
                     click.echo(f"      执行: {draft.execution.executed_at[:19]}")
+
+
+@cli.group()
+@click.pass_context
+def template(ctx):
+    """复核方案模板管理"""
+    pass
+
+
+@template.command("create")
+@click.option("--name", "-n", required=True, help="模板名称")
+@click.option("--status", "-s", required=True,
+              type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
+              help="目标状态")
+@click.option("--handler", "-H", default="", help="默认处理人")
+@click.option("--remark", "-r", default="", help="备注模板")
+@click.option("--source-type", default="", help="来源方式")
+@click.option("--description", "-d", default="", help="模板描述")
+@click.pass_context
+def template_create(ctx, name, status, handler, remark, source_type, description):
+    """创建模板"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        template = create_template(
+            state,
+            name=name,
+            target_status=status,
+            handler=handler,
+            remark=remark,
+            source_type=source_type,
+            description=description
+        )
+        status_name = STATUS_NAMES.get(status, status)
+        click.echo(click.style(f"模板创建成功: {template.template_id}", fg="green"))
+        click.echo(f"  名称: {template.name}")
+        click.echo(f"  目标状态: {status_name}")
+        if handler:
+            click.echo(f"  默认处理人: {handler}")
+        if remark:
+            click.echo(f"  备注模板: {remark}")
+        if source_type:
+            click.echo(f"  来源方式: {source_type}")
+        if description:
+            click.echo(f"  描述: {description}")
+        click.echo(f"  创建时间: {template.created_at[:19]}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@template.command("update")
+@click.argument("template_id_or_name")
+@click.option("--name", "-n", default=None, help="模板名称")
+@click.option("--status", "-s", default=None,
+              type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
+              help="目标状态")
+@click.option("--handler", "-H", default=None, help="默认处理人")
+@click.option("--remark", "-r", default=None, help="备注模板")
+@click.option("--source-type", default=None, help="来源方式")
+@click.option("--description", "-d", default=None, help="模板描述")
+@click.pass_context
+def template_update(ctx, template_id_or_name, name, status, handler, remark, source_type, description):
+    """更新模板"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    template = state.get_template(template_id_or_name)
+    if not template:
+        template = state.get_template_by_name(template_id_or_name)
+    if not template:
+        click.echo(click.style(f"错误: 模板不存在: {template_id_or_name}", fg="red"), err=True)
+        sys.exit(1)
+
+    try:
+        template = update_template(
+            state,
+            template_id=template.template_id,
+            name=name,
+            target_status=status,
+            handler=handler,
+            remark=remark,
+            source_type=source_type,
+            description=description
+        )
+        status_name = STATUS_NAMES.get(template.target_status, template.target_status)
+        click.echo(click.style(f"模板更新成功: {template.template_id}", fg="green"))
+        click.echo(f"  名称: {template.name}")
+        click.echo(f"  目标状态: {status_name}")
+        click.echo(f"  默认处理人: {template.handler or '-'}")
+        click.echo(f"  备注模板: {template.remark or '-'}")
+        click.echo(f"  来源方式: {template.source_type or '-'}")
+        click.echo(f"  描述: {template.description or '-'}")
+        click.echo(f"  更新时间: {template.updated_at[:19]}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@template.command("delete")
+@click.argument("template_id_or_name")
+@click.option("--yes", "-y", is_flag=True, help="跳过确认")
+@click.pass_context
+def template_delete(ctx, template_id_or_name, yes):
+    """删除模板"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    template = state.get_template(template_id_or_name)
+    if not template:
+        template = state.get_template_by_name(template_id_or_name)
+    if not template:
+        click.echo(click.style(f"错误: 模板不存在: {template_id_or_name}", fg="red"), err=True)
+        sys.exit(1)
+
+    if not yes:
+        click.echo(f"模板名称: {template.name}")
+        click.echo(f"模板ID: {template.template_id}")
+        status_name = STATUS_NAMES.get(template.target_status, template.target_status)
+        click.echo(f"目标状态: {status_name}")
+        if not click.confirm("确定要删除此模板吗？"):
+            click.echo("已取消")
+            return
+
+    try:
+        delete_template(state, template.template_id)
+        click.echo(click.style(f"模板已删除: {template.name}", fg="green"))
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@template.command("list")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.pass_context
+def template_list(ctx, limit):
+    """列出模板"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    templates = state.list_templates()
+
+    if not templates:
+        click.echo("暂无模板")
+        return
+
+    display = templates[:limit]
+
+    click.echo(click.style(f"=== 模板列表 (共 {len(templates)} 条) ===", bold=True))
+    click.echo()
+
+    for i, tpl in enumerate(display, 1):
+        status_name = STATUS_NAMES.get(tpl.target_status, tpl.target_status)
+        click.echo(f"[{i}] {click.style(tpl.template_id, fg='cyan')} - {tpl.name}")
+        click.echo(f"    目标状态: {status_name}  "
+                   f"处理人: {tpl.handler or '-'}  "
+                   f"创建: {tpl.created_at[:19]}")
+        if tpl.description:
+            click.echo(f"    描述: {tpl.description[:40]}")
+        click.echo()
+
+    if len(templates) > limit:
+        click.echo(f"... 还有 {len(templates) - limit} 条，使用 -n 调整显示数量")
+
+
+@template.command("show")
+@click.argument("template_id_or_name")
+@click.pass_context
+def template_show(ctx, template_id_or_name):
+    """显示模板详情"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    template = state.get_template(template_id_or_name)
+    if not template:
+        template = state.get_template_by_name(template_id_or_name)
+    if not template:
+        click.echo(click.style(f"错误: 模板不存在: {template_id_or_name}", fg="red"), err=True)
+        sys.exit(1)
+
+    status_name = STATUS_NAMES.get(template.target_status, template.target_status)
+
+    click.echo(click.style(f"=== {template.name} ===", bold=True, fg="cyan"))
+    click.echo(f"模板ID: {template.template_id}")
+    click.echo(f"目标状态: {status_name}")
+    click.echo(f"默认处理人: {template.handler or '-'}")
+    click.echo(f"备注模板: {template.remark or '-'}")
+    click.echo(f"来源方式: {template.source_type or '-'}")
+    click.echo(f"描述: {template.description or '-'}")
+    click.echo(f"创建时间: {template.created_at[:19]}")
+    click.echo(f"更新时间: {template.updated_at[:19]}")
+
+    related_drafts = [
+        d for d in state.drafts.values()
+        if d.template_id == template.template_id
+    ]
+    if related_drafts:
+        click.echo()
+        click.echo(f"关联草稿: {len(related_drafts)} 个")
+        for d in related_drafts[:5]:
+            draft_status = DRAFT_STATUS_NAMES.get(d.status, d.status)
+            click.echo(f"  - {d.draft_id} ({d.name}) [{draft_status}]")
+        if len(related_drafts) > 5:
+            click.echo(f"  ... 还有 {len(related_drafts) - 5} 个")
+
+
+@template.command("import")
+@click.argument("json_file", type=click.Path(exists=True))
+@click.option("--overwrite", "-o", is_flag=True, help="覆盖同名模板")
+@click.pass_context
+def template_import(ctx, json_file, overwrite):
+    """从 JSON 文件导入模板"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        result = import_templates(state, json_file, overwrite=overwrite)
+
+        click.echo(click.style("=== 模板导入结果 ===", bold=True))
+        click.echo(f"文件: {json_file}")
+        click.echo()
+
+        if result["imported"]:
+            click.echo(click.style(f"成功导入 {result['imported_count']} 个:", fg="green"))
+            for name in result["imported"]:
+                click.echo(f"  {_sym('check')} {name}")
+            click.echo()
+
+        if result["skipped"]:
+            click.echo(click.style(f"跳过 {result['skipped_count']} 个:", fg="yellow"))
+            for name in result["skipped"]:
+                click.echo(f"  {_sym('warn')} {name}")
+            click.echo()
+
+        if result["errors"]:
+            click.echo(click.style(f"错误 {result['error_count']} 个:", fg="red"))
+            for err in result["errors"]:
+                click.echo(f"  {_sym('cross')} {err}")
+            click.echo()
+
+        if result["error_count"] > 0 and result["imported_count"] == 0:
+            sys.exit(1)
+
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@template.command("export")
+@click.argument("output_file")
+@click.option("--ids", default=None, help="逗号分隔的模板ID列表，不指定则导出全部")
+@click.pass_context
+def template_export(ctx, output_file, ids):
+    """导出模板到 JSON 文件"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    template_ids = None
+    if ids:
+        template_ids = [x.strip() for x in ids.split(",") if x.strip()]
+
+    try:
+        count = export_templates(state, output_file, template_ids=template_ids)
+        click.echo(click.style(f"导出成功: {output_file}", fg="green"))
+        click.echo(f"  模板数量: {count}")
+    except Exception as e:
+        click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
+        sys.exit(1)
 
 
 def main():

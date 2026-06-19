@@ -108,6 +108,11 @@ def generate_draft_id() -> str:
     return f"DRAFT-{uuid.uuid4().hex[:12].upper()}"
 
 
+def generate_template_id() -> str:
+    """生成模板 ID"""
+    return f"TPL-{uuid.uuid4().hex[:10].upper()}"
+
+
 DRAFT_STATUSES = ["pending", "executed", "voided"]
 DRAFT_STATUS_NAMES = {
     "pending": "待执行",
@@ -151,6 +156,27 @@ class DraftExecutionResult:
 
 
 @dataclass
+class DraftTemplate:
+    """复核方案模板"""
+    template_id: str = ""
+    name: str = ""
+    target_status: str = ""
+    handler: str = ""
+    remark: str = ""
+    source_type: str = ""
+    description: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DraftTemplate":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class DraftEntry:
     """复核方案草稿"""
     draft_id: str = ""
@@ -165,6 +191,8 @@ class DraftEntry:
     status: str = "pending"
     items: List[DraftItem] = field(default_factory=list)
     execution: DraftExecutionResult = field(default_factory=DraftExecutionResult)
+    template_id: str = ""
+    template_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -179,7 +207,9 @@ class DraftEntry:
             "created_by": self.created_by,
             "status": self.status,
             "items": [item.to_dict() for item in self.items],
-            "execution": self.execution.to_dict()
+            "execution": self.execution.to_dict(),
+            "template_id": self.template_id,
+            "template_snapshot": copy.deepcopy(self.template_snapshot)
         }
 
     @classmethod
@@ -202,7 +232,9 @@ class DraftEntry:
             created_by=data.get("created_by", ""),
             status=data.get("status", "pending"),
             items=items,
-            execution=execution
+            execution=execution,
+            template_id=data.get("template_id", ""),
+            template_snapshot=copy.deepcopy(data.get("template_snapshot", {}))
         )
 
 

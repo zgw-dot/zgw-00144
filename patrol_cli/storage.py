@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry
+from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate
 
 
 class PatrolState:
@@ -21,6 +21,7 @@ class PatrolState:
         self.import_log_file = self.data_dir / "import_log.json"
         self.review_log_file = self.data_dir / "review_log.json"
         self.drafts_file = self.data_dir / "drafts.json"
+        self.templates_file = self.data_dir / "templates.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
@@ -29,6 +30,7 @@ class PatrolState:
         self.import_logs: List[ImportLogEntry] = []
         self.review_logs: List[ReviewLogEntry] = []
         self.drafts: Dict[str, DraftEntry] = {}
+        self.templates: Dict[str, DraftTemplate] = {}
 
         self._load()
 
@@ -68,6 +70,13 @@ class PatrolState:
                 for draft_id, draft_data in drafts_data.items():
                     self.drafts[draft_id] = DraftEntry.from_dict(draft_data)
 
+        if self.templates_file.exists():
+            with open(self.templates_file, "r", encoding="utf-8") as f:
+                templates_data = json.load(f)
+                self.templates = {}
+                for tpl_id, tpl_data in templates_data.items():
+                    self.templates[tpl_id] = DraftTemplate.from_dict(tpl_data)
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -91,6 +100,7 @@ class PatrolState:
         self.save_import_logs()
         self.save_review_logs()
         self.save_drafts()
+        self.save_templates()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -212,6 +222,7 @@ class PatrolState:
         defect_id: str = "",
         handler: str = "",
         log_type: str = "",
+        draft_id: str = "",
         limit: int = 0
     ) -> List[ReviewLogEntry]:
         """获取复核日志，按时间倒序，支持筛选"""
@@ -222,6 +233,8 @@ class PatrolState:
             logs = [l for l in logs if l.handler == handler]
         if log_type:
             logs = [l for l in logs if l.log_type == log_type]
+        if draft_id:
+            logs = [l for l in logs if l.draft_id == draft_id]
         if limit > 0:
             return logs[:limit]
         return logs
@@ -293,3 +306,45 @@ class PatrolState:
                 result.append(draft)
         result.sort(key=lambda d: d.created_at, reverse=True)
         return result
+
+    def save_templates(self):
+        """单独保存模板"""
+        templates_data = {
+            tpl_id: tpl.to_dict()
+            for tpl_id, tpl in self.templates.items()
+        }
+        with open(self.templates_file, "w", encoding="utf-8") as f:
+            json.dump(templates_data, f, ensure_ascii=False, indent=2)
+
+    def add_template(self, template: DraftTemplate):
+        """添加模板"""
+        self.templates[template.template_id] = template
+
+    def get_template(self, template_id: str) -> Optional[DraftTemplate]:
+        """获取模板"""
+        return self.templates.get(template_id)
+
+    def get_template_by_name(self, name: str) -> Optional[DraftTemplate]:
+        """按名称获取模板"""
+        for tpl in self.templates.values():
+            if tpl.name == name:
+                return tpl
+        return None
+
+    def update_template(self, template: DraftTemplate):
+        """更新模板"""
+        if template.template_id in self.templates:
+            self.templates[template.template_id] = template
+
+    def delete_template(self, template_id: str) -> bool:
+        """删除模板，返回是否成功"""
+        if template_id in self.templates:
+            del self.templates[template_id]
+            return True
+        return False
+
+    def list_templates(self) -> List[DraftTemplate]:
+        """列出所有模板，按创建时间倒序"""
+        templates = list(self.templates.values())
+        templates.sort(key=lambda t: t.created_at, reverse=True)
+        return templates

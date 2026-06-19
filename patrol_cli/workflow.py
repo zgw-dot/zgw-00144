@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import Optional, List, Tuple
 from .models import (
     DefectRecord, STATUS_NAMES, DEFECT_STATUSES, ReviewLogEntry, generate_log_id,
-    DraftEntry, DraftItem, DraftExecutionResult, generate_draft_id
+    DraftEntry, DraftItem, DraftExecutionResult, generate_draft_id,
+    DraftTemplate, generate_template_id
 )
 from .storage import PatrolState
 
@@ -716,3 +717,334 @@ def void_draft(
     state.save_drafts()
 
     return draft
+
+
+TEMPLATE_REQUIRED_FIELDS = ["name", "target_status"]
+
+
+def create_template(
+    state: PatrolState,
+    name: str,
+    target_status: str,
+    handler: str = "",
+    remark: str = "",
+    source_type: str = "",
+    description: str = ""
+) -> DraftTemplate:
+    """
+    创建复核方案模板。
+
+    Args:
+        state: 状态对象
+        name: 模板名称
+        target_status: 目标状态
+        handler: 默认处理人
+        remark: 备注模板
+        source_type: 来源方式
+        description: 模板描述
+
+    Returns:
+        创建好的 DraftTemplate
+    """
+    if not name.strip():
+        raise WorkflowError("模板名称不能为空")
+
+    if target_status not in DEFECT_STATUSES:
+        raise WorkflowError(f"无效的目标状态: {target_status}")
+
+    existing = state.get_template_by_name(name)
+    if existing:
+        raise WorkflowError(f"模板名称已存在: {name}")
+
+    template_id = generate_template_id()
+    now = datetime.now().isoformat()
+
+    template = DraftTemplate(
+        template_id=template_id,
+        name=name.strip(),
+        target_status=target_status,
+        handler=handler,
+        remark=remark,
+        source_type=source_type,
+        description=description,
+        created_at=now,
+        updated_at=now
+    )
+
+    state.add_template(template)
+    state.save_templates()
+
+    return template
+
+
+def update_template(
+    state: PatrolState,
+    template_id: str,
+    name: Optional[str] = None,
+    target_status: Optional[str] = None,
+    handler: Optional[str] = None,
+    remark: Optional[str] = None,
+    source_type: Optional[str] = None,
+    description: Optional[str] = None
+) -> DraftTemplate:
+    """
+    更新模板。
+
+    只有传入的参数（非 None）才会更新。
+    传空字符串可以清空对应字段（name 除外，name 不能为空）。
+    """
+    template = state.get_template(template_id)
+    if not template:
+        raise WorkflowError(f"模板不存在: {template_id}")
+
+    if name is not None:
+        if not name.strip():
+            raise WorkflowError("模板名称不能为空")
+        existing = state.get_template_by_name(name.strip())
+        if existing and existing.template_id != template_id:
+            raise WorkflowError(f"模板名称已存在: {name}")
+        template.name = name.strip()
+
+    if target_status is not None:
+        if target_status not in DEFECT_STATUSES:
+            raise WorkflowError(f"无效的目标状态: {target_status}")
+        template.target_status = target_status
+
+    if handler is not None:
+        template.handler = handler
+    if remark is not None:
+        template.remark = remark
+    if source_type is not None:
+        template.source_type = source_type
+    if description is not None:
+        template.description = description
+
+    template.updated_at = datetime.now().isoformat()
+
+    state.update_template(template)
+    state.save_templates()
+
+    return template
+
+
+def delete_template(state: PatrolState, template_id: str) -> bool:
+    """删除模板"""
+    template = state.get_template(template_id)
+    if not template:
+        raise WorkflowError(f"模板不存在: {template_id}")
+
+    success = state.delete_template(template_id)
+    if success:
+        state.save_templates()
+    return success
+
+
+def create_draft_from_template(
+    state: PatrolState,
+    template_id: str,
+    source: str,
+    source_type: str,
+    name: str = "",
+    status: str = "",
+    handler: str = "",
+    remark: str = "",
+    created_by: str = ""
+) -> DraftEntry:
+    """
+    从模板创建草稿，支持命令行参数覆盖。
+
+    优先级：命令行参数 > 模板值
+
+    Args:
+        state: 状态对象
+        template_id: 模板ID
+        source: 缺陷来源
+        source_type: 来源类型
+        name: 草稿名称（覆盖模板）
+        status: 目标状态（覆盖模板）
+        handler: 处理人（覆盖模板）
+        remark: 备注（覆盖模板）
+        created_by: 创建人
+
+    Returns:
+        创建好的 DraftEntry
+    """
+    template = state.get_template(template_id)
+    if not template:
+        raise WorkflowError(f"模板不存在: {template_id}")
+
+    target_status = status if status else template.target_status
+    final_handler = handler if handler else template.handler
+    final_remark = remark if remark else template.remark
+    draft_name = name if name else template.name
+
+    if not target_status:
+        raise WorkflowError("目标状态不能为空")
+
+    draft = create_draft(
+        state,
+        source=source,
+        source_type=source_type,
+        target_status=target_status,
+        name=draft_name,
+        handler=final_handler,
+        remark=final_remark,
+        created_by=created_by
+    )
+
+    draft.template_id = template.template_id
+    draft.template_snapshot = template.to_dict()
+
+    state.update_draft(draft)
+    state.save_drafts()
+
+    return draft
+
+
+def import_templates(
+    state: PatrolState,
+    file_path: str,
+    overwrite: bool = False
+) -> dict:
+    """
+    从 JSON 文件导入模板。
+
+    规则：
+    - 缺字段的模板直接拒绝，不导入
+    - 同名模板：overwrite=True 则覆盖，overwrite=False 则跳过并提示
+    - 重复导入（相同 template_id）视为同名处理逻辑
+
+    Args:
+        state: 状态对象
+        file_path: JSON 文件路径
+        overwrite: 是否覆盖同名模板
+
+    Returns:
+        包含导入统计信息的字典
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(file_path)
+    if not path.exists():
+        raise WorkflowError(f"文件不存在: {file_path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise WorkflowError(f"JSON 解析失败: {e}")
+
+    if isinstance(data, dict):
+        templates_data = list(data.values())
+    elif isinstance(data, list):
+        templates_data = data
+    else:
+        raise WorkflowError("JSON 格式不正确，应为列表或对象")
+
+    imported = []
+    skipped = []
+    errors = []
+
+    for idx, tpl_data in enumerate(templates_data, 1):
+        missing = [f for f in TEMPLATE_REQUIRED_FIELDS if f not in tpl_data or not tpl_data.get(f)]
+        if missing:
+            errors.append(f"第{idx}条: 缺少必填字段 {', '.join(missing)}")
+            continue
+
+        name = tpl_data.get("name", "").strip()
+        target_status = tpl_data.get("target_status", "")
+
+        if target_status not in DEFECT_STATUSES:
+            errors.append(f"第{idx}条 ({name}): 无效的目标状态 {target_status}")
+            continue
+
+        existing_by_name = state.get_template_by_name(name)
+
+        if existing_by_name:
+            if overwrite:
+                template_id = existing_by_name.template_id
+                template = DraftTemplate.from_dict(tpl_data)
+                template.template_id = template_id
+                template.created_at = existing_by_name.created_at
+                template.updated_at = datetime.now().isoformat()
+                state.update_template(template)
+                imported.append(f"{name} (覆盖)")
+            else:
+                skipped.append(f"{name} (同名已存在)")
+            continue
+
+        template_id = tpl_data.get("template_id", "")
+        if template_id and state.get_template(template_id):
+            existing = state.get_template(template_id)
+            if overwrite:
+                template = DraftTemplate.from_dict(tpl_data)
+                template.template_id = template_id
+                template.created_at = existing.created_at
+                template.updated_at = datetime.now().isoformat()
+                state.update_template(template)
+                imported.append(f"{name} (按ID覆盖)")
+            else:
+                skipped.append(f"{name} (同ID已存在)")
+            continue
+
+        template = DraftTemplate.from_dict(tpl_data)
+        if not template.template_id:
+            template.template_id = generate_template_id()
+        if not template.created_at:
+            template.created_at = datetime.now().isoformat()
+        if not template.updated_at:
+            template.updated_at = template.created_at
+
+        state.add_template(template)
+        imported.append(name)
+
+    state.save_templates()
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors,
+        "imported_count": len(imported),
+        "skipped_count": len(skipped),
+        "error_count": len(errors)
+    }
+
+
+def export_templates(
+    state: PatrolState,
+    file_path: str,
+    template_ids: Optional[List[str]] = None
+) -> int:
+    """
+    导出模板到 JSON 文件。
+
+    Args:
+        state: 状态对象
+        file_path: 输出文件路径
+        template_ids: 指定模板ID列表，None 则导出全部
+
+    Returns:
+        导出的模板数量
+    """
+    import json
+    from pathlib import Path
+
+    if template_ids:
+        templates = []
+        for tid in template_ids:
+            tpl = state.get_template(tid)
+            if tpl:
+                templates.append(tpl)
+    else:
+        templates = state.list_templates()
+
+    data = {tpl.template_id: tpl.to_dict() for tpl in templates}
+
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return len(templates)

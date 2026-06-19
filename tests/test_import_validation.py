@@ -2594,3 +2594,631 @@ class TestDraftFullChain:
 
         assert len(drafts_executed) == 1
         assert drafts_executed[0].draft_id == draft_id
+
+
+class TestDraftTemplates:
+    """模板功能完整测试"""
+
+    def test_create_template_success(self, config, state_with_data):
+        """测试创建模板成功"""
+        from patrol_cli.workflow import create_template
+
+        template = create_template(
+            state_with_data,
+            name="标准派单模板",
+            target_status="dispatched",
+            handler="张三",
+            remark="常规巡检发现，已安排处理",
+            source_type="ids",
+            description="用于常规派单的标准模板"
+        )
+
+        assert template.template_id.startswith("TPL-")
+        assert template.name == "标准派单模板"
+        assert template.target_status == "dispatched"
+        assert template.handler == "张三"
+        assert template.remark == "常规巡检发现，已安排处理"
+        assert template.source_type == "ids"
+        assert template.description == "用于常规派单的标准模板"
+        assert template.created_at != ""
+        assert template.updated_at != ""
+
+        saved = state_with_data.get_template(template.template_id)
+        assert saved is not None
+        assert saved.name == "标准派单模板"
+
+    def test_create_template_duplicate_name_rejected(self, config, state_with_data):
+        """测试创建模板 - 同名拒绝"""
+        from patrol_cli.workflow import create_template, WorkflowError
+
+        create_template(state_with_data, name="重复名测试", target_status="dispatched")
+
+        with pytest.raises(WorkflowError) as excinfo:
+            create_template(state_with_data, name="重复名测试", target_status="closed")
+
+        assert "模板名称已存在" in str(excinfo.value)
+
+    def test_create_template_invalid_status_rejected(self, config, state_with_data):
+        """测试创建模板 - 无效状态拒绝"""
+        from patrol_cli.workflow import create_template, WorkflowError
+
+        with pytest.raises(WorkflowError) as excinfo:
+            create_template(state_with_data, name="无效状态模板", target_status="invalid")
+
+        assert "无效的目标状态" in str(excinfo.value)
+
+    def test_create_template_empty_name_rejected(self, config, state_with_data):
+        """测试创建模板 - 空名称拒绝"""
+        from patrol_cli.workflow import create_template, WorkflowError
+
+        with pytest.raises(WorkflowError) as excinfo:
+            create_template(state_with_data, name="  ", target_status="dispatched")
+
+        assert "模板名称不能为空" in str(excinfo.value)
+
+    def test_update_template(self, config, state_with_data):
+        """测试更新模板"""
+        from patrol_cli.workflow import create_template, update_template
+
+        template = create_template(
+            state_with_data,
+            name="更新测试模板",
+            target_status="pending",
+            handler="旧处理人",
+            remark="旧备注"
+        )
+
+        updated = update_template(
+            state_with_data,
+            template_id=template.template_id,
+            name="更新后的模板名",
+            target_status="closed",
+            handler="新处理人",
+            remark="新备注",
+            description="新描述"
+        )
+
+        assert updated.name == "更新后的模板名"
+        assert updated.target_status == "closed"
+        assert updated.handler == "新处理人"
+        assert updated.remark == "新备注"
+        assert updated.description == "新描述"
+        assert updated.updated_at >= template.updated_at
+
+        saved = state_with_data.get_template(template.template_id)
+        assert saved.name == "更新后的模板名"
+
+    def test_update_template_partial_fields(self, config, state_with_data):
+        """测试部分字段更新 - 未指定的字段保持不变"""
+        from patrol_cli.workflow import create_template, update_template
+
+        template = create_template(
+            state_with_data,
+            name="部分更新模板",
+            target_status="dispatched",
+            handler="保留处理人",
+            remark="保留备注"
+        )
+
+        updated = update_template(
+            state_with_data,
+            template_id=template.template_id,
+            handler="只改处理人"
+        )
+
+        assert updated.name == "部分更新模板"
+        assert updated.target_status == "dispatched"
+        assert updated.handler == "只改处理人"
+        assert updated.remark == "保留备注"
+
+    def test_delete_template(self, config, state_with_data):
+        """测试删除模板"""
+        from patrol_cli.workflow import create_template, delete_template
+
+        template = create_template(
+            state_with_data,
+            name="待删除模板",
+            target_status="dispatched"
+        )
+
+        assert state_with_data.get_template(template.template_id) is not None
+
+        result = delete_template(state_with_data, template.template_id)
+        assert result is True
+
+        assert state_with_data.get_template(template.template_id) is None
+
+    def test_delete_nonexistent_template_rejected(self, config, state_with_data):
+        """测试删除不存在的模板"""
+        from patrol_cli.workflow import delete_template, WorkflowError
+
+        with pytest.raises(WorkflowError) as excinfo:
+            delete_template(state_with_data, "TPL-NOTEXIST-001")
+
+        assert "模板不存在" in str(excinfo.value)
+
+    def test_create_draft_from_template(self, config, state_with_data):
+        """测试从模板创建草稿"""
+        from patrol_cli.workflow import create_template, create_draft_from_template
+
+        template = create_template(
+            state_with_data,
+            name="派单标准模板",
+            target_status="dispatched",
+            handler="模板处理人",
+            remark="模板备注内容"
+        )
+
+        defects = state_with_data.list_defects(status="pending")
+        defect_ids = [d.defect_id for d in defects[:3]]
+        ids_str = ",".join(defect_ids)
+
+        draft = create_draft_from_template(
+            state_with_data,
+            template_id=template.template_id,
+            source=ids_str,
+            source_type="ids"
+        )
+
+        assert draft.template_id == template.template_id
+        assert draft.target_status == "dispatched"
+        assert draft.handler == "模板处理人"
+        assert draft.remark == "模板备注内容"
+        assert draft.name == "派单标准模板"
+        assert len(draft.items) == 3
+
+        assert draft.template_snapshot is not None
+        assert draft.template_snapshot["name"] == "派单标准模板"
+        assert draft.template_snapshot["target_status"] == "dispatched"
+        assert draft.template_snapshot["handler"] == "模板处理人"
+
+    def test_create_draft_from_template_with_overrides(self, config, state_with_data):
+        """测试从模板创建草稿 - 命令行参数覆盖模板值"""
+        from patrol_cli.workflow import create_template, create_draft_from_template
+
+        template = create_template(
+            state_with_data,
+            name="覆盖测试模板",
+            target_status="dispatched",
+            handler="模板处理人",
+            remark="模板备注"
+        )
+
+        defects = state_with_data.list_defects(status="pending")
+        defect_ids = [d.defect_id for d in defects[:2]]
+        ids_str = ",".join(defect_ids)
+
+        draft = create_draft_from_template(
+            state_with_data,
+            template_id=template.template_id,
+            source=ids_str,
+            source_type="ids",
+            name="自定义草稿名",
+            status="false_positive",
+            handler="自定义处理人",
+            remark="自定义备注"
+        )
+
+        assert draft.name == "自定义草稿名"
+        assert draft.target_status == "false_positive"
+        assert draft.handler == "自定义处理人"
+        assert draft.remark == "自定义备注"
+
+        assert draft.template_snapshot["name"] == "覆盖测试模板"
+        assert draft.template_snapshot["target_status"] == "dispatched"
+
+    def test_template_modification_does_not_affect_existing_draft(self, config, state_with_data):
+        """测试模板修改不影响已有的草稿（快照机制）"""
+        from patrol_cli.workflow import (
+            create_template, update_template, create_draft_from_template
+        )
+
+        template = create_template(
+            state_with_data,
+            name="快照验证模板",
+            target_status="dispatched",
+            handler="原始处理人",
+            remark="原始备注"
+        )
+
+        defects = state_with_data.list_defects(status="pending")
+        defect_ids = [d.defect_id for d in defects[:2]]
+        ids_str = ",".join(defect_ids)
+
+        draft = create_draft_from_template(
+            state_with_data,
+            template_id=template.template_id,
+            source=ids_str,
+            source_type="ids"
+        )
+
+        assert draft.template_snapshot["handler"] == "原始处理人"
+        assert draft.template_snapshot["remark"] == "原始备注"
+        assert draft.handler == "原始处理人"
+        assert draft.remark == "原始备注"
+
+        update_template(
+            state_with_data,
+            template_id=template.template_id,
+            handler="修改后处理人",
+            remark="修改后备注"
+        )
+
+        updated_template = state_with_data.get_template(template.template_id)
+        assert updated_template.handler == "修改后处理人"
+
+        draft_after = state_with_data.get_draft(draft.draft_id)
+        assert draft_after.handler == "原始处理人"
+        assert draft_after.remark == "原始备注"
+        assert draft_after.template_snapshot["handler"] == "原始处理人"
+        assert draft_after.template_snapshot["remark"] == "原始备注"
+
+    def test_template_export_and_import(self, config, temp_data_dir, tmp_path):
+        """测试模板导出和导入"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import (
+            create_template, export_templates, import_templates
+        )
+
+        state = PatrolState(data_dir=temp_data_dir)
+
+        t1 = create_template(state, name="导出模板1", target_status="dispatched",
+                            handler="处理人A", remark="备注A", description="描述A")
+        t2 = create_template(state, name="导出模板2", target_status="closed",
+                            handler="处理人B", remark="备注B")
+
+        export_file = tmp_path / "templates_export.json"
+        count = export_templates(state, str(export_file))
+        assert count == 2
+
+        import json
+        with open(export_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert len(data) == 2
+        assert t1.template_id in data
+        assert data[t1.template_id]["name"] == "导出模板1"
+
+        state2_data = tmp_path / "state2_data"
+        state2_data.mkdir()
+        state2 = PatrolState(data_dir=str(state2_data))
+
+        result = import_templates(state2, str(export_file))
+        assert result["imported_count"] == 2
+        assert result["skipped_count"] == 0
+        assert result["error_count"] == 0
+
+        assert state2.get_template_by_name("导出模板1") is not None
+        assert state2.get_template_by_name("导出模板2") is not None
+
+        t1_imported = state2.get_template_by_name("导出模板1")
+        assert t1_imported.target_status == "dispatched"
+        assert t1_imported.handler == "处理人A"
+        assert t1_imported.remark == "备注A"
+
+    def test_template_import_missing_fields_rejected(self, config, temp_data_dir, tmp_path):
+        """测试模板导入 - 缺字段的模板被拒绝"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import import_templates
+        import json
+
+        bad_templates = [
+            {"name": "缺状态模板"},
+            {"target_status": "dispatched"},
+            {"name": "", "target_status": "dispatched"},
+        ]
+        bad_file = tmp_path / "bad_templates.json"
+        with open(bad_file, "w", encoding="utf-8") as f:
+            json.dump(bad_templates, f, ensure_ascii=False)
+
+        state = PatrolState(data_dir=temp_data_dir)
+        result = import_templates(state, str(bad_file))
+
+        assert result["error_count"] == 3
+        assert result["imported_count"] == 0
+        assert all("缺少必填字段" in e for e in result["errors"])
+
+    def test_template_import_duplicate_name_skip(self, config, temp_data_dir, tmp_path):
+        """测试模板导入 - 同名模板默认跳过（不覆盖）"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import create_template, export_templates, import_templates
+
+        state = PatrolState(data_dir=temp_data_dir)
+        create_template(state, name="同名模板", target_status="dispatched",
+                        handler="原处理人", remark="原备注")
+
+        tpl_data = {
+            "TPL-TEST-001": {
+                "template_id": "TPL-TEST-001",
+                "name": "同名模板",
+                "target_status": "closed",
+                "handler": "新处理人",
+                "remark": "新备注"
+            }
+        }
+        import_file = tmp_path / "duplicate_name.json"
+        import json
+        with open(import_file, "w", encoding="utf-8") as f:
+            json.dump(tpl_data, f, ensure_ascii=False)
+
+        result = import_templates(state, str(import_file))
+
+        assert result["skipped_count"] == 1
+        assert result["imported_count"] == 0
+        assert "同名已存在" in result["skipped"][0]
+
+        tpl = state.get_template_by_name("同名模板")
+        assert tpl.handler == "原处理人"
+        assert tpl.target_status == "dispatched"
+
+    def test_template_import_duplicate_name_overwrite(self, config, temp_data_dir, tmp_path):
+        """测试模板导入 - 同名模板 overwrite=True 时覆盖"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import create_template, import_templates
+
+        state = PatrolState(data_dir=temp_data_dir)
+        original = create_template(state, name="覆盖测试", target_status="dispatched",
+                                   handler="原处理人", remark="原备注")
+
+        tpl_data = {
+            "NEW-ID-001": {
+                "template_id": "NEW-ID-001",
+                "name": "覆盖测试",
+                "target_status": "closed",
+                "handler": "新处理人",
+                "remark": "新备注"
+            }
+        }
+        import json
+        import_file = tmp_path / "overwrite_test.json"
+        with open(import_file, "w", encoding="utf-8") as f:
+            json.dump(tpl_data, f, ensure_ascii=False)
+
+        result = import_templates(state, str(import_file), overwrite=True)
+
+        assert result["imported_count"] == 1
+        assert "覆盖" in result["imported"][0]
+
+        tpl = state.get_template_by_name("覆盖测试")
+        assert tpl.template_id == original.template_id
+        assert tpl.target_status == "closed"
+        assert tpl.handler == "新处理人"
+        assert tpl.remark == "新备注"
+
+    def test_template_persistence_across_reload(self, config, temp_data_dir):
+        """测试模板持久化 - 重启后仍然存在"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import create_template, update_template
+
+        state1 = PatrolState(data_dir=temp_data_dir)
+        template = create_template(
+            state1,
+            name="持久化测试模板",
+            target_status="dispatched",
+            handler="持久化处理人",
+            remark="持久化备注",
+            description="持久化描述"
+        )
+        tpl_id = template.template_id
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        loaded = state2.get_template(tpl_id)
+
+        assert loaded is not None
+        assert loaded.name == "持久化测试模板"
+        assert loaded.target_status == "dispatched"
+        assert loaded.handler == "持久化处理人"
+        assert loaded.remark == "持久化备注"
+        assert loaded.description == "持久化描述"
+        assert loaded.created_at == template.created_at
+        assert loaded.updated_at == template.updated_at
+
+        all_templates = state2.list_templates()
+        assert len(all_templates) >= 1
+        assert any(t.template_id == tpl_id for t in all_templates)
+
+    def test_template_draft_persistence(self, config, temp_data_dir):
+        """测试带模板来源的草稿持久化"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import create_template, create_draft_from_template
+
+        state1 = PatrolState(data_dir=temp_data_dir)
+        template = create_template(
+            state1,
+            name="草稿持久化模板",
+            target_status="dispatched",
+            handler="模板处理人",
+            remark="模板备注"
+        )
+
+        from patrol_cli.merger import import_and_merge
+        import_and_merge("examples/sample_data.csv", config, state1, "BATCH-TPL-PERSIST")
+
+        defects = state1.list_defects(status="pending")
+        ids_str = ",".join([d.defect_id for d in defects[:2]])
+
+        draft = create_draft_from_template(
+            state1,
+            template_id=template.template_id,
+            source=ids_str,
+            source_type="ids"
+        )
+        draft_id = draft.draft_id
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        loaded_draft = state2.get_draft(draft_id)
+
+        assert loaded_draft is not None
+        assert loaded_draft.template_id == template.template_id
+        assert loaded_draft.template_snapshot is not None
+        assert loaded_draft.template_snapshot["name"] == "草稿持久化模板"
+        assert loaded_draft.template_snapshot["handler"] == "模板处理人"
+        assert loaded_draft.handler == "模板处理人"
+        assert loaded_draft.target_status == "dispatched"
+
+    def test_template_list_and_get_by_name(self, config, state_with_data):
+        """测试模板列表和按名称查询"""
+        from patrol_cli.workflow import create_template
+
+        t1 = create_template(state_with_data, name="列表测试A", target_status="dispatched")
+        t2 = create_template(state_with_data, name="列表测试B", target_status="closed")
+
+        templates = state_with_data.list_templates()
+        assert len(templates) >= 2
+        names = [t.name for t in templates]
+        assert "列表测试A" in names
+        assert "列表测试B" in names
+
+        found = state_with_data.get_template_by_name("列表测试A")
+        assert found is not None
+        assert found.template_id == t1.template_id
+
+        not_found = state_with_data.get_template_by_name("不存在的模板")
+        assert not_found is None
+
+    def test_template_export_draft_includes_template_info(self, config, temp_data_dir, tmp_path):
+        """测试草稿导出包含模板来源信息"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import create_template, create_draft_from_template, execute_draft
+        from patrol_cli.merger import import_and_merge
+        from patrol_cli.exporter import export_draft_csv, export_draft_list_csv
+
+        state = PatrolState(data_dir=temp_data_dir)
+        import_and_merge("examples/sample_data.csv", config, state, "BATCH-EXPORT-TPL")
+
+        template = create_template(
+            state,
+            name="导出测试模板",
+            target_status="dispatched",
+            handler="导出处理人",
+            remark="导出备注"
+        )
+
+        defects = state.list_defects(status="pending")
+        ids_str = ",".join([d.defect_id for d in defects[:2]])
+
+        draft = create_draft_from_template(
+            state,
+            template_id=template.template_id,
+            source=ids_str,
+            source_type="ids"
+        )
+
+        execute_draft(state, draft.draft_id)
+
+        detail_csv = tmp_path / "draft_detail_with_tpl.csv"
+        count = export_draft_csv(state, draft.draft_id, str(detail_csv))
+        assert count == 2
+
+        with open(detail_csv, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+
+        assert "模板ID" in content
+        assert "模板名称" in content
+        assert template.template_id in content
+        assert "导出测试模板" in content
+
+        list_csv = tmp_path / "draft_list_with_tpl.csv"
+        count = export_draft_list_csv(state, str(list_csv))
+        assert count >= 1
+
+        with open(list_csv, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+
+        assert "模板ID" in content
+        assert "模板名称" in content
+        assert template.template_id in content
+        assert "导出测试模板" in content
+
+    def test_full_template_workflow_chain(self, config, temp_data_dir):
+        """模板全链路回归测试：建模板→套模板生成草稿→改模板→回看旧草稿→重启查询"""
+        from patrol_cli.storage import PatrolState
+        from patrol_cli.workflow import (
+            create_template, update_template, create_draft_from_template,
+            execute_draft
+        )
+        from patrol_cli.merger import import_and_merge
+
+        state = PatrolState(data_dir=temp_data_dir)
+
+        import_and_merge("examples/sample_data.csv", config, state, "BATCH-FULL-CHAIN")
+
+        template = create_template(
+            state,
+            name="全链路测试模板",
+            target_status="dispatched",
+            handler="原始处理人",
+            remark="原始备注",
+            source_type="ids",
+            description="用于全链路测试的模板"
+        )
+        tpl_id = template.template_id
+
+        assert state.get_template(tpl_id) is not None
+        assert state.get_template_by_name("全链路测试模板") is not None
+
+        defects = state.list_defects(status="pending")
+        defect_ids = [d.defect_id for d in defects[:3]]
+        ids_str = ",".join(defect_ids)
+
+        draft = create_draft_from_template(
+            state,
+            template_id=tpl_id,
+            source=ids_str,
+            source_type="ids",
+            name="全链路草稿"
+        )
+        draft_id = draft.draft_id
+
+        assert draft.template_id == tpl_id
+        assert draft.handler == "原始处理人"
+        assert draft.remark == "原始备注"
+        assert draft.template_snapshot["name"] == "全链路测试模板"
+
+        update_template(
+            state,
+            template_id=tpl_id,
+            handler="修改后处理人",
+            remark="修改后备注",
+            target_status="closed"
+        )
+
+        updated_tpl = state.get_template(tpl_id)
+        assert updated_tpl.handler == "修改后处理人"
+        assert updated_tpl.target_status == "closed"
+
+        draft_after_update = state.get_draft(draft_id)
+        assert draft_after_update.handler == "原始处理人"
+        assert draft_after_update.remark == "原始备注"
+        assert draft_after_update.target_status == "dispatched"
+        assert draft_after_update.template_snapshot["handler"] == "原始处理人"
+        assert draft_after_update.template_snapshot["target_status"] == "dispatched"
+
+        state_reload = PatrolState(data_dir=temp_data_dir)
+
+        reloaded_tpl = state_reload.get_template(tpl_id)
+        assert reloaded_tpl is not None
+        assert reloaded_tpl.handler == "修改后处理人"
+        assert reloaded_tpl.target_status == "closed"
+
+        reloaded_draft = state_reload.get_draft(draft_id)
+        assert reloaded_draft is not None
+        assert reloaded_draft.template_id == tpl_id
+        assert reloaded_draft.handler == "原始处理人"
+        assert reloaded_draft.remark == "原始备注"
+        assert reloaded_draft.template_snapshot["name"] == "全链路测试模板"
+        assert reloaded_draft.template_snapshot["handler"] == "原始处理人"
+
+        templates = state_reload.list_templates()
+        assert any(t.template_id == tpl_id for t in templates)
+
+        execute_draft(state_reload, draft_id)
+
+        executed_draft = state_reload.get_draft(draft_id)
+        assert executed_draft.status == "executed"
+        assert executed_draft.template_id == tpl_id
+        assert executed_draft.template_snapshot["name"] == "全链路测试模板"
+
+        review_logs = state_reload.get_review_logs(draft_id=draft_id)
+        assert len(review_logs) > 0
+        for log in review_logs:
+            assert log.draft_id == draft_id

@@ -443,6 +443,7 @@ def export_draft_csv(
     fieldnames = [
         "草稿ID", "草稿名称", "目标状态", "处理人", "备注",
         "创建时间", "执行时间", "撤销时间",
+        "模板ID", "模板名称",
         "缺陷ID", "楼栋", "设备编号", "设备类别", "缺陷类型",
         "严重等级", "快照状态", "当前状态", "描述"
     ]
@@ -453,6 +454,10 @@ def export_draft_csv(
 
         target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
         undo_time = draft.execution.undo_at[:19] if draft.execution.undo_at else ""
+
+        template_name = ""
+        if draft.template_snapshot:
+            template_name = draft.template_snapshot.get("name", "")
 
         for item in draft.items:
             snapshot = item.defect_snapshot
@@ -472,6 +477,8 @@ def export_draft_csv(
                 "创建时间": draft.created_at[:19],
                 "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
                 "撤销时间": undo_time,
+                "模板ID": draft.template_id,
+                "模板名称": template_name,
                 "缺陷ID": item.defect_id,
                 "楼栋": snapshot.get("building", ""),
                 "设备编号": snapshot.get("device_id", ""),
@@ -498,9 +505,10 @@ def export_draft_list_csv(
         return 0
 
     fieldnames = [
-        "草稿ID", "名称", "状态", "来源类型", "来源引用",
+        "草稿ID", "草稿名称", "状态", "来源类型", "来源引用",
         "目标状态", "处理人", "备注", "创建人", "创建时间",
-        "条目数", "执行时间", "撤销时间", "成功条数"
+        "条目数", "执行时间", "撤销时间", "成功条数",
+        "模板ID", "模板名称"
     ]
 
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
@@ -511,9 +519,13 @@ def export_draft_list_csv(
             status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
             target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
 
+            template_name = ""
+            if draft.template_snapshot:
+                template_name = draft.template_snapshot.get("name", "")
+
             writer.writerow({
                 "草稿ID": draft.draft_id,
-                "名称": draft.name,
+                "草稿名称": draft.name,
                 "状态": status_name,
                 "来源类型": draft.source_type,
                 "来源引用": draft.source_ref,
@@ -525,7 +537,9 @@ def export_draft_list_csv(
                 "条目数": len(draft.items),
                 "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
                 "撤销时间": draft.execution.undo_at[:19] if draft.execution.undo_at else "",
-                "成功条数": draft.execution.success_count if draft.execution.success_count else 0
+                "成功条数": draft.execution.success_count if draft.execution.success_count else 0,
+                "模板ID": draft.template_id,
+                "模板名称": template_name
             })
 
     return len(drafts)
