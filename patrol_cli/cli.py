@@ -2323,16 +2323,28 @@ def followup(ctx):
               help="回访时限（小时），覆盖规则配置")
 @click.option("--deadline", default=None, help="截止时间（ISO格式），直接指定")
 @click.option("--dry-run", is_flag=True, help="仅预览，不创建")
+@click.option("--status-fingerprint", default=None,
+              help="状态指纹（JSON格式），来自上一次 dry-run 的输出，用于检测预览后状态漂移")
 @click.pass_context
 def followup_create(ctx, name, defect_ids, building, status, handler, remark,
-                    created_by, deadline_hours, deadline, dry_run):
+                    created_by, deadline_hours, deadline, dry_run, status_fingerprint):
     """创建回访计划（按缺陷ID/楼栋/状态拉取）"""
+    import json
+
     config = ctx.obj["config"]
     state = _get_state(ctx.obj["data_dir"])
 
     ids_list = None
     if defect_ids:
         ids_list = [x.strip() for x in defect_ids.split(",") if x.strip()]
+
+    fingerprint_dict = None
+    if status_fingerprint:
+        try:
+            fingerprint_dict = json.loads(status_fingerprint)
+        except json.JSONDecodeError as e:
+            click.echo(click.style(f"错误: 状态指纹 JSON 解析失败: {e}", fg="red"), err=True)
+            sys.exit(1)
 
     try:
         preview = preview_create_followup(
@@ -2375,16 +2387,19 @@ def followup_create(ctx, name, defect_ids, building, status, handler, remark,
                                f"- 截止: {item['deadline'][:19]}")
 
             click.echo()
+            click.echo(f"状态指纹: {json.dumps(preview.status_fingerprint, ensure_ascii=False)}")
             click.echo(f"数据目录: {ctx.obj['data_dir']}")
             return
 
-        if not preview.can_create:
+        if not preview.can_create and not fingerprint_dict:
             click.echo(click.style(f"发现 {len(preview.conflicts)} 个冲突，无法创建:", fg="red", bold=True))
             for c in preview.conflicts:
                 click.echo(f"  {_sym('cross')} {c}")
             click.echo()
             click.echo(click.style("提示: 有冲突时整批不创建", fg="yellow"))
             sys.exit(1)
+
+        create_fingerprint = fingerprint_dict if fingerprint_dict else preview.status_fingerprint
 
         plan = create_followup_plan(
             state, config, name,
@@ -2396,7 +2411,7 @@ def followup_create(ctx, name, defect_ids, building, status, handler, remark,
             created_by=created_by,
             deadline_override_hours=deadline_hours,
             deadline_override=deadline,
-            status_fingerprint=preview.status_fingerprint,
+            status_fingerprint=create_fingerprint,
         )
 
         click.echo(click.style(f"回访计划创建成功: {plan.plan_id}", fg="green", bold=True))

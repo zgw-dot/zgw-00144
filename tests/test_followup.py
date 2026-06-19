@@ -1,11 +1,15 @@
 import json
 import csv
 import os
+import re
 from datetime import datetime, timedelta
+
+from click.testing import CliRunner
 
 from patrol_cli.storage import PatrolState
 from patrol_cli.config import load_rules
 from patrol_cli.models import DefectRecord
+from patrol_cli.cli import cli
 from patrol_cli.followup import (
     FollowUpError,
     preview_create_followup, create_followup_plan,
@@ -1160,3 +1164,250 @@ class TestJsonCsvRoundTrip:
 
         plans = list_followup_plans(state2)
         assert len(plans) == 2
+
+
+def _parse_fingerprint_from_output(output):
+    """从 CLI 输出中解析状态指纹 JSON"""
+    match = re.search(r"状态指纹:\s*(\{.*\})", output)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+
+
+class TestCliFollowupCreateFlow:
+    """CLI 层回访计划创建链路测试
+
+    重点验证：先 dry-run 看预览，再隔一次命令正式 create 的完整链路。
+    两次调用通过状态指纹（JSON 字符串）传递，不靠内存透传 preview 对象。
+    """
+
+    def _invoke(self, data_dir, args):
+        """调用 CLI 命令的辅助方法"""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--config", TEST_CONFIG, "--data-dir", str(data_dir)] + args,
+            catch_exceptions=False
+        )
+        return result
+
+    def test_cli_dry_run_preview_returns_fingerprint(self, tmp_path):
+        """CLI dry-run 预览应该输出状态指纹"""
+        state = _setup_state(tmp_path)
+        _add_defect(state, "DEF-CLI-DRY1", status="pending")
+        _add_defect(state, "DEF-CLI-DRY2", status="pending")
+
+        result = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "CLI预览测试",
+            "--ids", "DEF-CLI-DRY1,DEF-CLI-DRY2",
+            "--dry-run"
+        ])
+
+        assert result.exit_code == 0
+        assert "回访计划预览" in result.output
+        assert "无冲突，可创建" in result.output
+        assert "状态指纹:" in result.output
+
+        fingerprint = _parse_fingerprint_from_output(result.output)
+        assert fingerprint is not None
+        assert fingerprint["DEF-CLI-DRY1"] == "pending"
+        assert fingerprint["DEF-CLI-DRY2"] == "pending"
+
+        assert len(state.followup_plans) == 0
+
+    def test_cli_create_succeeds_with_no_drift(self, tmp_path):
+        """不漂移对照用例：dry-run 预览后直接 create，应该成功创建"""
+        state = _setup_state(tmp_path)
+        _add_defect(state, "DEF-CLI-OK1", status="pending")
+        _add_defect(state, "DEF-CLI-OK2", status="pending")
+
+        result_dry = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "CLI正常创建测试",
+            "--ids", "DEF-CLI-OK1,DEF-CLI-OK2",
+            "--handler", "测试员",
+            "--remark", "对照用例",
+            "--dry-run"
+        ])
+        assert result_dry.exit_code == 0
+
+        fingerprint = _parse_fingerprint_from_output(result_dry.output)
+        assert fingerprint is not None
+        assert len(fingerprint) == 2
+
+        result_create = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "CLI正常创建测试",
+            "--ids", "DEF-CLI-OK1,DEF-CLI-OK2",
+            "--handler", "测试员",
+            "--remark", "对照用例",
+            "--status-fingerprint", json.dumps(fingerprint, ensure_ascii=False)
+        ])
+
+        assert result_create.exit_code == 0
+        assert "回访计划创建成功" in result_create.output
+        assert "包含缺陷: 2 条" in result_create.output
+        assert "测试员" in result_create.output
+        assert "对照用例" in result_create.output
+
+        state2 = PatrolState(data_dir=str(tmp_path))
+        assert len(state2.followup_plans) == 1
+        plan = list(state2.followup_plans.values())[0]
+        assert plan.name == "CLI正常创建测试"
+        assert len(plan.items) == 2
+        assert plan.handler == "测试员"
+        assert plan.remark == "对照用例"
+
+    def test_cli_create_fails_on_status_drift_between_calls(self, tmp_path):
+        """状态漂移用例：dry-run 预览后改缺陷状态，再 create 应该整批失败
+
+        验证点：
+        1. 第一次调用 dry-run 预览成功，得到指纹
+        2. 中间修改其中一条缺陷状态
+        3. 第二次正式 create 带指纹调用，整批失败
+        4. 报错信息包含状态漂移描述
+        5. 没有留下任何回访计划（原子性）
+        """
+        state = _setup_state(tmp_path)
+        _add_defect(state, "DEF-CLI-DRIFT1", status="pending")
+        _add_defect(state, "DEF-CLI-DRIFT2", status="pending")
+
+        result_dry = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "CLI漂移测试",
+            "--ids", "DEF-CLI-DRIFT1,DEF-CLI-DRIFT2",
+            "--dry-run"
+        ])
+        assert result_dry.exit_code == 0
+        assert "无冲突，可创建" in result_dry.output
+
+        fingerprint = _parse_fingerprint_from_output(result_dry.output)
+        assert fingerprint is not None
+        assert fingerprint["DEF-CLI-DRIFT1"] == "pending"
+        assert fingerprint["DEF-CLI-DRIFT2"] == "pending"
+
+        defect = state.get_defect("DEF-CLI-DRIFT1")
+        defect.status = "closed"
+        state.save()
+
+        result_create = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "CLI漂移测试",
+            "--ids", "DEF-CLI-DRIFT1,DEF-CLI-DRIFT2",
+            "--status-fingerprint", json.dumps(fingerprint, ensure_ascii=False)
+        ])
+
+        assert result_create.exit_code != 0
+        assert "状态已变更" in result_create.output
+        assert "DEF-CLI-DRIFT1" in result_create.output
+        assert "预览时" in result_create.output
+        assert "当前" in result_create.output
+        assert "待派单" in result_create.output or "pending" in result_create.output
+        assert "已关闭" in result_create.output or "closed" in result_create.output
+
+        state2 = PatrolState(data_dir=str(tmp_path))
+        assert len(state2.followup_plans) == 0
+
+    def test_cli_create_no_fingerprint_uses_live_state(self, tmp_path):
+        """不传指纹时，create 使用当前状态（不检查漂移）"""
+        state = _setup_state(tmp_path)
+        _add_defect(state, "DEF-CLI-NOFP", status="pending")
+
+        result_dry = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "无指纹测试",
+            "--ids", "DEF-CLI-NOFP",
+            "--dry-run"
+        ])
+        assert result_dry.exit_code == 0
+
+        defect = state.get_defect("DEF-CLI-NOFP")
+        defect.status = "closed"
+        state.save()
+
+        result_create = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "无指纹测试",
+            "--ids", "DEF-CLI-NOFP",
+        ])
+
+        assert result_create.exit_code == 0
+        assert "回访计划创建成功" in result_create.output
+
+        state2 = PatrolState(data_dir=str(tmp_path))
+        assert len(state2.followup_plans) == 1
+
+    def test_cli_create_multiple_defects_partial_drift_rejects_all(self, tmp_path):
+        """部分缺陷漂移：只要有一个漂移，整批都不创建"""
+        state = _setup_state(tmp_path)
+        _add_defect(state, "DEF-CLI-PDRIFT-A", status="pending")
+        _add_defect(state, "DEF-CLI-PDRIFT-B", status="pending")
+        _add_defect(state, "DEF-CLI-PDRIFT-C", status="pending")
+
+        result_dry = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "部分漂移测试",
+            "--ids", "DEF-CLI-PDRIFT-A,DEF-CLI-PDRIFT-B,DEF-CLI-PDRIFT-C",
+            "--dry-run"
+        ])
+        assert result_dry.exit_code == 0
+
+        fingerprint = _parse_fingerprint_from_output(result_dry.output)
+        assert fingerprint is not None
+
+        defect = state.get_defect("DEF-CLI-PDRIFT-B")
+        defect.status = "dispatched"
+        state.save()
+
+        result_create = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "部分漂移测试",
+            "--ids", "DEF-CLI-PDRIFT-A,DEF-CLI-PDRIFT-B,DEF-CLI-PDRIFT-C",
+            "--status-fingerprint", json.dumps(fingerprint, ensure_ascii=False)
+        ])
+
+        assert result_create.exit_code != 0
+        assert "状态已变更" in result_create.output
+        assert "DEF-CLI-PDRIFT-B" in result_create.output
+
+        state2 = PatrolState(data_dir=str(tmp_path))
+        assert len(state2.followup_plans) == 0
+
+    def test_cli_create_with_building_filter(self, tmp_path):
+        """按楼栋筛选的 CLI 创建链路测试"""
+        state = _setup_state(tmp_path)
+        _add_defect(state, "DEF-CLI-BLD-A1", building="A栋", status="pending")
+        _add_defect(state, "DEF-CLI-BLD-A2", building="A栋", status="pending")
+        _add_defect(state, "DEF-CLI-BLD-B1", building="B栋", status="pending")
+
+        result_dry = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "楼栋筛选测试",
+            "--building", "A栋",
+            "--dry-run"
+        ])
+        assert result_dry.exit_code == 0
+        assert "将包含缺陷: 2 条" in result_dry.output
+
+        fingerprint = _parse_fingerprint_from_output(result_dry.output)
+        assert fingerprint is not None
+        assert len(fingerprint) == 2
+
+        result_create = self._invoke(tmp_path, [
+            "followup", "create",
+            "--name", "楼栋筛选测试",
+            "--building", "A栋",
+            "--status-fingerprint", json.dumps(fingerprint, ensure_ascii=False)
+        ])
+
+        assert result_create.exit_code == 0
+        assert "回访计划创建成功" in result_create.output
+
+        state2 = PatrolState(data_dir=str(tmp_path))
+        assert len(state2.followup_plans) == 1
+        plan = list(state2.followup_plans.values())[0]
+        assert len(plan.items) == 2
