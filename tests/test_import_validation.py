@@ -927,16 +927,20 @@ class TestUndoRollback:
         logs_before = state.get_import_logs()
         assert len([l for l in logs_before if l.log_type == "import"]) == 2
 
+        last_log_before = state.get_last_import_log("import")
+        assert last_log_before.filename == "log_test2.csv"
+
         from patrol_cli.workflow import undo_last
         undo_last(state)
 
         logs_after = state.get_import_logs()
-        assert len([l for l in logs_after if l.log_type == "import"]) == 2, "撤销不影响导入日志记录"
+        assert len([l for l in logs_after if l.log_type == "import"]) == 1, \
+            f"撤销后日志应回退，期望1条import日志，实际{len([l for l in logs_after if l.log_type == 'import'])}条"
 
         last_log = state.get_last_import_log("import")
         assert last_log is not None
-        assert last_log.filename == "log_test2.csv"
-        assert last_log.result == "success"
+        assert last_log.filename == "log_test1.csv", \
+            f"撤销后最近导入日志应为log_test1.csv，实际为{last_log.filename}"
 
         from patrol_cli.exporter import export_html
         html_path = tmp_path / "export_after_undo.html"
@@ -945,7 +949,8 @@ class TestUndoRollback:
         with open(html_path, "r", encoding="utf-8") as f:
             html_content = f.read()
         assert "last-import" in html_content
-        assert "log_test2.csv" in html_content
+        assert "log_test1.csv" in html_content, "HTML导出应显示回退后的最近导入文件"
+        assert "log_test2.csv" not in html_content, "HTML导出不应显示已撤销的导入文件"
         assert batch_id in html_content
 
         stats = state.stats()
@@ -978,3 +983,92 @@ class TestUndoRollback:
         stats = state.stats()
         assert stats["total"] == 1
         assert stats["imported_files"] == 1
+
+    def test_undo_full_chain_rollback(self, config, temp_data_dir, tmp_path):
+        """回归测试：撤销后缺陷数、已导入文件数、最近导入信息、import-log、导出结果和用户可见提示全部一致回退"""
+        state = PatrolState(data_dir=temp_data_dir)
+        batch_id = "BATCH-CHAIN"
+
+        csv1 = tmp_path / "baseline.csv"
+        write_csv(csv1, [
+            "1号楼,EL-001,elevator,门机故障,critical,基线缺陷1,2025-06-15 08:30:00,张三,1单元",
+            "2号楼,EL-002,elevator,按钮失灵,medium,基线缺陷2,2025-06-15 09:00:00,李四,2单元",
+        ])
+        import_and_merge(str(csv1), config, state, batch_id)
+
+        stats_baseline = state.stats()
+        assert stats_baseline["total"] == 2
+        assert stats_baseline["imported_files"] == 1
+
+        import_logs_baseline = len([l for l in state.import_logs if l.log_type == "import"])
+        last_import_baseline = state.get_last_import_log("import")
+        assert last_import_baseline.filename == "baseline.csv"
+
+        from patrol_cli.exporter import export_html
+        html_baseline_path = tmp_path / "baseline.html"
+        export_html(state, str(html_baseline_path), config)
+        with open(html_baseline_path, "r", encoding="utf-8") as f:
+            html_baseline = f.read()
+        assert "baseline.csv" in html_baseline
+
+        csv2 = tmp_path / "second.csv"
+        write_csv(csv2, [
+            "1号楼,EL-001,elevator,门机故障,critical,合并到基线缺陷1,2025-06-15 10:00:00,王五,1单元",
+            "3号楼,EL-003,elevator,光幕故障,high,新增缺陷3,2025-06-16 14:00:00,赵六,3单元",
+        ])
+        result = import_and_merge(str(csv2), config, state, batch_id)
+        assert result.new_defects == 1
+        assert result.merged_defects == 1
+
+        stats_after = state.stats()
+        assert stats_after["total"] == 3
+        assert stats_after["imported_files"] == 2
+        assert state.is_file_imported("second.csv") is True
+
+        import_logs_after = len([l for l in state.import_logs if l.log_type == "import"])
+        assert import_logs_after == import_logs_baseline + 1
+
+        last_import_after = state.get_last_import_log("import")
+        assert last_import_after.filename == "second.csv"
+
+        from patrol_cli.workflow import undo_last
+        action = undo_last(state)
+        assert "second.csv" in action
+
+        stats_undo = state.stats()
+        assert stats_undo["total"] == stats_baseline["total"], \
+            f"撤销后缺陷数应回到{stats_baseline['total']}，实际为{stats_undo['total']}"
+        assert stats_undo["imported_files"] == stats_baseline["imported_files"], \
+            f"撤销后已导入文件数应回到{stats_baseline['imported_files']}，实际为{stats_undo['imported_files']}"
+        assert state.is_file_imported("second.csv") is False
+        assert state.is_file_imported("baseline.csv") is True
+
+        import_logs_undo = len([l for l in state.import_logs if l.log_type == "import"])
+        assert import_logs_undo == import_logs_baseline, \
+            f"撤销后import日志数应回到{import_logs_baseline}，实际为{import_logs_undo}"
+
+        last_import_undo = state.get_last_import_log("import")
+        assert last_import_undo.filename == "baseline.csv", \
+            f"撤销后最近导入信息应为baseline.csv，实际为{last_import_undo.filename}"
+
+        html_undo_path = tmp_path / "after_undo.html"
+        export_html(state, str(html_undo_path), config)
+        with open(html_undo_path, "r", encoding="utf-8") as f:
+            html_undo = f.read()
+        assert "baseline.csv" in html_undo, "撤销后HTML导出应显示baseline.csv"
+        assert "second.csv" not in html_undo, "撤销后HTML导出不应显示已撤销的second.csv"
+
+        result2 = import_and_merge(str(csv2), config, state, batch_id)
+        assert result2.new_defects == 1
+        assert result2.merged_defects == 1
+        assert state.is_file_imported("second.csv") is True
+
+        with pytest.raises(ValueError, match="已经导入过了"):
+            import_and_merge(str(csv2), config, state, batch_id)
+
+        state_reload = PatrolState(data_dir=temp_data_dir)
+        assert state_reload.stats()["total"] == 3
+        assert state_reload.stats()["imported_files"] == 2
+        assert state_reload.is_file_imported("second.csv") is True
+        last_import_reload = state_reload.get_last_import_log("import")
+        assert last_import_reload.filename == "second.csv"
