@@ -310,9 +310,21 @@ def review_log_cmd(ctx, limit, defect_id, handler, log_type):
         }.get(log.log_type, "white")
 
         if log.log_type == "undo":
-            click.echo(f"[{i}] {click.style(type_label, fg=type_color)} "
-                       f"- {log.remark}")
-            click.echo(f"    时间: {log.timestamp[:19]}  批次: {log.batch_id or '-'}")
+            if log.defect_id:
+                from_name = STATUS_NAMES.get(log.from_status, log.from_status)
+                to_name = STATUS_NAMES.get(log.to_status, log.to_status)
+                click.echo(f"[{i}] {click.style(type_label, fg=type_color)} "
+                           f"{click.style(log.defect_id, fg='cyan')} "
+                           f"{from_name} {_sym('arrow')} {to_name}")
+                click.echo(f"    时间: {log.timestamp[:19]}  批次: {log.batch_id or '-'}")
+                if log.handler:
+                    click.echo(f"    处理人: {log.handler}")
+                if log.remark:
+                    click.echo(f"    备注: {log.remark}")
+            else:
+                click.echo(f"[{i}] {click.style(type_label, fg=type_color)} "
+                           f"- {log.remark}")
+                click.echo(f"    时间: {log.timestamp[:19]}  批次: {log.batch_id or '-'}")
         else:
             from_name = STATUS_NAMES.get(log.from_status, log.from_status)
             to_name = STATUS_NAMES.get(log.to_status, log.to_status)
@@ -438,9 +450,10 @@ def batch(ctx, defect_ids, status, remark, handler):
     if success_count > 0:
         click.echo(click.style(f"成功复核 {success_count} 条 → {status_name}", fg="green"))
     if errors:
-        click.echo(click.style(f"失败 {len(errors)} 条:", fg="yellow"))
+        click.echo(click.style(f"失败 {len(errors)} 条:", fg="red"), err=True)
         for err in errors:
-            click.echo(f"  {err}")
+            click.echo(f"  {err}", err=True)
+        sys.exit(1)
 
 
 @cli.command()

@@ -1,0 +1,38 @@
+[
+  {
+    "log_id": "LOG-19FC0AEC9DD7",
+    "log_type": "review",
+    "defect_id": "DEF-42055084C08A",
+    "from_status": "pending",
+    "to_status": "dispatched",
+    "handler": "张工",
+    "remark": "单条复核测试",
+    "timestamp": "2026-06-19T13:19:13.326072",
+    "batch_id": "BATCH-E2E-001",
+    "parent_log_id": ""
+  },
+  {
+    "log_id": "LOG-CA3381C65847",
+    "log_type": "undo",
+    "defect_id": "DEF-36275B780B8D",
+    "from_status": "closed",
+    "to_status": "pending",
+    "handler": "李组",
+    "remark": "撤销操作: 批量复核 2 条→已关闭",
+    "timestamp": "2026-06-19T13:20:14.591862",
+    "batch_id": "BATCH-E2E-001",
+    "parent_log_id": ""
+  },
+  {
+    "log_id": "LOG-AFAE0099B4E2",
+    "log_type": "undo",
+    "defect_id": "DEF-80B383C393D0",
+    "from_status": "closed",
+    "to_status": "pending",
+    "handler": "李组",
+    "remark": "撤销操作: 批量复核 2 条→已关闭",
+    "timestamp": "2026-06-19T13:20:14.591896",
+    "batch_id": "BATCH-E2E-001",
+    "parent_log_id": ""
+  }
+]

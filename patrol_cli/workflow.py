@@ -106,9 +106,18 @@ def review_defect(
     )
     state.add_review_log(log_entry)
 
+    review_entries = [{
+        "defect_id": defect_id,
+        "from_status": old_status,
+        "to_status": new_status,
+        "handler": handler,
+        "remark": remark
+    }]
+
     state.push_undo(
         action=f"复核 {defect_id} {STATUS_NAMES[old_status]}→{STATUS_NAMES[new_status]}",
-        snapshot=snapshot
+        snapshot=snapshot,
+        review_entries=review_entries
     )
 
     state.save()
@@ -123,23 +132,39 @@ def undo_last(state: PatrolState) -> Optional[str]:
 
     undo_item = state.pop_undo()
     action = undo_item["action"]
-    snapshot_time = undo_item.get("timestamp", "")
 
     state.restore_defects(undo_item["snapshot"])
 
-    undo_log = ReviewLogEntry(
-        log_id=generate_log_id(),
-        log_type="undo",
-        defect_id="",
-        from_status="",
-        to_status="",
-        handler="",
-        remark=f"撤销操作: {action}",
-        timestamp=datetime.now().isoformat(),
-        batch_id=state.batch_id,
-        parent_log_id=""
-    )
-    state.add_review_log(undo_log)
+    review_entries = undo_item.get("review_entries", [])
+    for entry in review_entries:
+        undo_log = ReviewLogEntry(
+            log_id=generate_log_id(),
+            log_type="undo",
+            defect_id=entry["defect_id"],
+            from_status=entry["to_status"],
+            to_status=entry["from_status"],
+            handler=entry.get("handler", ""),
+            remark=f"撤销操作: {action}",
+            timestamp=datetime.now().isoformat(),
+            batch_id=state.batch_id,
+            parent_log_id=""
+        )
+        state.add_review_log(undo_log)
+
+    if not review_entries:
+        undo_log = ReviewLogEntry(
+            log_id=generate_log_id(),
+            log_type="undo",
+            defect_id="",
+            from_status="",
+            to_status="",
+            handler="",
+            remark=f"撤销操作: {action}",
+            timestamp=datetime.now().isoformat(),
+            batch_id=state.batch_id,
+            parent_log_id=""
+        )
+        state.add_review_log(undo_log)
 
     state.save()
 
@@ -212,6 +237,7 @@ def batch_review(
     parent_log_id = generate_log_id()
 
     success_count = 0
+    review_entries = []
     for defect_id in valid_ids:
         defect = state.get_defect(defect_id)
         if not defect:
@@ -244,12 +270,20 @@ def batch_review(
             parent_log_id=parent_log_id
         )
         state.add_review_log(log_entry)
+        review_entries.append({
+            "defect_id": defect_id,
+            "from_status": old_status,
+            "to_status": new_status,
+            "handler": handler,
+            "remark": remark
+        })
         success_count += 1
 
     if success_count > 0:
         state.push_undo(
             action=f"批量复核 {success_count} 条→{STATUS_NAMES[new_status]}",
-            snapshot=snapshot
+            snapshot=snapshot,
+            review_entries=review_entries
         )
         state.save()
 

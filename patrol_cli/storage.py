@@ -112,13 +112,16 @@ class PatrolState:
         result.sort(key=lambda d: d.first_seen, reverse=True)
         return result
 
-    def push_undo(self, action: str, snapshot: Dict[str, Any]):
+    def push_undo(self, action: str, snapshot: Dict[str, Any], review_entries: Optional[List[Dict[str, Any]]] = None):
         """推入撤销栈"""
-        self.undo_stack.append({
+        item = {
             "action": action,
             "timestamp": datetime.now().isoformat(),
             "snapshot": snapshot
-        })
+        }
+        if review_entries:
+            item["review_entries"] = review_entries
+        self.undo_stack.append(item)
 
     def pop_undo(self) -> Optional[Dict[str, Any]]:
         """弹出撤销项"""

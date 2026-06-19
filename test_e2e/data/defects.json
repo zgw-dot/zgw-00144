@@ -1,0 +1,135 @@
+{
+  "DEF-42055084C08A": {
+    "defect_id": "DEF-42055084C08A",
+    "building": "1号楼",
+    "device_id": "EL-001",
+    "device_category": "elevator",
+    "defect_type": "门机故障",
+    "severity": "critical",
+    "description": "全链路测试门机故障1",
+    "first_seen": "2025-06-15T08:30:00",
+    "last_seen": "2025-06-15T08:30:00",
+    "status": "dispatched",
+    "source_rows": [
+      {
+        "row_id": "ROW-8202932F4F",
+        "source_file": "test_data.csv",
+        "line_number": 2,
+        "raw_data": {
+          "楼栋": "1号楼",
+          "设备编号": "EL-001",
+          "设备类别": "elevator",
+          "缺陷类型": "门机故障",
+          "严重等级": "critical",
+          "缺陷描述": "全链路测试门机故障1",
+          "巡检时间": "2025-06-15 08:30:00",
+          "巡检员": "张三",
+          "具体位置": "1单元"
+        },
+        "import_time": "2026-06-19T13:18:41.243647"
+      }
+    ],
+    "review_remark": "单条复核测试",
+    "handler": "张工",
+    "status_history": [
+      {
+        "from": "",
+        "to": "pending",
+        "time": "2026-06-19T13:18:41.253650",
+        "remark": "初始创建",
+        "handler": "system"
+      },
+      {
+        "from": "pending",
+        "to": "dispatched",
+        "time": "2026-06-19T13:19:13.325994",
+        "remark": "单条复核测试",
+        "handler": "张工"
+      }
+    ]
+  },
+  "DEF-36275B780B8D": {
+    "defect_id": "DEF-36275B780B8D",
+    "building": "2号楼",
+    "device_id": "EL-002",
+    "device_category": "elevator",
+    "defect_type": "按钮失灵",
+    "severity": "medium",
+    "description": "全链路测试按钮失灵2",
+    "first_seen": "2025-06-16T09:00:00",
+    "last_seen": "2025-06-16T09:00:00",
+    "status": "pending",
+    "source_rows": [
+      {
+        "row_id": "ROW-CA04468CC1",
+        "source_file": "test_data.csv",
+        "line_number": 3,
+        "raw_data": {
+          "楼栋": "2号楼",
+          "设备编号": "EL-002",
+          "设备类别": "elevator",
+          "缺陷类型": "按钮失灵",
+          "严重等级": "medium",
+          "缺陷描述": "全链路测试按钮失灵2",
+          "巡检时间": "2025-06-16 09:00:00",
+          "巡检员": "李四",
+          "具体位置": "2单元"
+        },
+        "import_time": "2026-06-19T13:18:41.243647"
+      }
+    ],
+    "review_remark": "",
+    "handler": "",
+    "status_history": [
+      {
+        "from": "",
+        "to": "pending",
+        "time": "2026-06-19T13:18:41.253700",
+        "remark": "初始创建",
+        "handler": "system"
+      }
+    ]
+  },
+  "DEF-80B383C393D0": {
+    "defect_id": "DEF-80B383C393D0",
+    "building": "3号楼",
+    "device_id": "EL-003",
+    "device_category": "elevator",
+    "defect_type": "光幕故障",
+    "severity": "high",
+    "description": "全链路测试光幕故障3",
+    "first_seen": "2025-06-17T10:00:00",
+    "last_seen": "2025-06-17T10:00:00",
+    "status": "pending",
+    "source_rows": [
+      {
+        "row_id": "ROW-C2D7A7CAAA",
+        "source_file": "test_data.csv",
+        "line_number": 4,
+        "raw_data": {
+          "楼栋": "3号楼",
+          "设备编号": "EL-003",
+          "设备类别": "elevator",
+          "缺陷类型": "光幕故障",
+          "严重等级": "high",
+          "缺陷描述": "全链路测试光幕故障3",
+          "巡检时间": "2025-06-17 10:00:00",
+          "巡检员": "王五",
+          "具体位置": "3单元"
+        },
+        "import_time": "2026-06-19T13:18:41.243647"
+      }
+    ],
+    "review_remark": "",
+    "handler": "",
+    "status_history": [
+      {
+        "from": "",
+        "to": "pending",
+        "time": "2026-06-19T13:18:41.253733",
+        "remark": "初始创建",
+        "handler": "system"
+      }
+    ]
+  }
+}

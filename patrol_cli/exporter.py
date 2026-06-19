@@ -63,12 +63,23 @@ def export_csv_with_sources(
     if not defects:
         return 0
 
+    review_fields = []
+    for i in range(1, 6):
+        review_fields.extend([
+            f"最近复核{i}_时间",
+            f"最近复核{i}_状态变更",
+            f"最近复核{i}_处理人",
+            f"最近复核{i}_备注",
+            f"最近复核{i}_类型"
+        ])
+
     fieldnames = [
         "缺陷ID", "楼栋", "设备编号", "设备类别", "缺陷类型",
         "严重等级", "状态", "描述", "首次发现", "最后发现",
         "来源文件", "来源行号", "导入时间", "处理人", "复核备注",
-        "最近复核时间", "最近复核状态变更", "最近复核人", "最近复核备注"
-    ]
+    ] + review_fields
+
+    type_labels = {"review": "单条复核", "batch_review": "批量复核", "undo": "撤销"}
 
     row_count = 0
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
@@ -76,21 +87,22 @@ def export_csv_with_sources(
         writer.writeheader()
 
         for d in defects:
-            last_review = state.get_last_review_log(defect_id=d.defect_id)
-            review_time = ""
-            review_status_change = ""
-            review_handler = ""
-            review_remark = ""
-            if last_review:
-                review_time = last_review.timestamp[:19] if last_review.timestamp else ""
-                from_name = STATUS_NAMES.get(last_review.from_status, last_review.from_status)
-                to_name = STATUS_NAMES.get(last_review.to_status, last_review.to_status)
-                review_status_change = f"{from_name} → {to_name}"
-                review_handler = last_review.handler
-                review_remark = last_review.remark
+            review_logs = state.get_review_logs(defect_id=d.defect_id, limit=5)
+            review_row_data = {}
+            for idx, log in enumerate(review_logs, 1):
+                if idx > 5:
+                    break
+                prefix = f"最近复核{idx}_"
+                from_name = STATUS_NAMES.get(log.from_status, log.from_status) if log.from_status else ""
+                to_name = STATUS_NAMES.get(log.to_status, log.to_status) if log.to_status else ""
+                review_row_data[prefix + "时间"] = log.timestamp[:19] if log.timestamp else ""
+                review_row_data[prefix + "状态变更"] = f"{from_name} → {to_name}" if from_name and to_name else ""
+                review_row_data[prefix + "处理人"] = log.handler
+                review_row_data[prefix + "备注"] = log.remark
+                review_row_data[prefix + "类型"] = type_labels.get(log.log_type, log.log_type)
 
             for sr in d.source_rows:
-                writer.writerow({
+                row = {
                     "缺陷ID": d.defect_id,
                     "楼栋": d.building,
                     "设备编号": d.device_id,
@@ -106,11 +118,9 @@ def export_csv_with_sources(
                     "导入时间": sr.import_time,
                     "处理人": d.handler,
                     "复核备注": d.review_remark,
-                    "最近复核时间": review_time,
-                    "最近复核状态变更": review_status_change,
-                    "最近复核人": review_handler,
-                    "最近复核备注": review_remark
-                })
+                }
+                row.update(review_row_data)
+                writer.writerow(row)
                 row_count += 1
 
     return row_count

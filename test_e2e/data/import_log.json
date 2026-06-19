@@ -1,0 +1,30 @@
+[
+  {
+    "log_id": "LOG-C5545F532E06",
+    "log_type": "import",
+    "filename": "test_data.csv",
+    "batch_id": "BATCH-E2E-001",
+    "result": "failed",
+    "error_summary": "第2行: 必填字段缺失: building; 第3行: 必填字段缺失: building; 第4行: 必填字段缺失: building",
+    "timestamp": "2026-06-19T13:17:14.481200",
+    "total_rows": 3,
+    "valid_rows": 0,
+    "invalid_rows": 3,
+    "new_defects": 0,
+    "merged_defects": 0
+  },
+  {
+    "log_id": "LOG-5B4E7298F522",
+    "log_type": "import",
+    "filename": "test_data.csv",
+    "batch_id": "BATCH-E2E-001",
+    "result": "success",
+    "error_summary": "",
+    "timestamp": "2026-06-19T13:18:41.253757",
+    "total_rows": 3,
+    "valid_rows": 3,
+    "invalid_rows": 0,
+    "new_defects": 3,
+    "merged_defects": 0
+  }
+]
