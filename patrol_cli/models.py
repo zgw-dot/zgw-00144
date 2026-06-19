@@ -1,8 +1,7 @@
 """数据模型"""
 
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Any
-from datetime import datetime
+from typing import List, Dict, Any
 import uuid
 import copy
 
@@ -104,6 +103,109 @@ def generate_log_id() -> str:
     return f"LOG-{uuid.uuid4().hex[:12].upper()}"
 
 
+def generate_draft_id() -> str:
+    """生成草稿 ID"""
+    return f"DRAFT-{uuid.uuid4().hex[:12].upper()}"
+
+
+DRAFT_STATUSES = ["pending", "executed", "voided"]
+DRAFT_STATUS_NAMES = {
+    "pending": "待执行",
+    "executed": "已执行",
+    "voided": "已作废"
+}
+
+
+@dataclass
+class DraftItem:
+    """草稿条目 - 单条缺陷的复核计划"""
+    defect_id: str
+    target_status: str
+    defect_snapshot: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DraftItem":
+        return cls(**data)
+
+
+@dataclass
+class DraftExecutionResult:
+    """草稿执行结果"""
+    execution_id: str = ""
+    executed_at: str = ""
+    success_count: int = 0
+    error_count: int = 0
+    errors: List[str] = field(default_factory=list)
+    undo_execution_id: str = ""
+    undo_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DraftExecutionResult":
+        return cls(**data)
+
+
+@dataclass
+class DraftEntry:
+    """复核方案草稿"""
+    draft_id: str = ""
+    name: str = ""
+    source_type: str = ""
+    source_ref: str = ""
+    target_status: str = ""
+    handler: str = ""
+    remark: str = ""
+    created_at: str = ""
+    created_by: str = ""
+    status: str = "pending"
+    items: List[DraftItem] = field(default_factory=list)
+    execution: DraftExecutionResult = field(default_factory=DraftExecutionResult)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "draft_id": self.draft_id,
+            "name": self.name,
+            "source_type": self.source_type,
+            "source_ref": self.source_ref,
+            "target_status": self.target_status,
+            "handler": self.handler,
+            "remark": self.remark,
+            "created_at": self.created_at,
+            "created_by": self.created_by,
+            "status": self.status,
+            "items": [item.to_dict() for item in self.items],
+            "execution": self.execution.to_dict()
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DraftEntry":
+        items = [DraftItem.from_dict(d) for d in data.get("items", [])]
+        execution_data = data.get("execution", {})
+        if isinstance(execution_data, dict):
+            execution = DraftExecutionResult.from_dict(execution_data)
+        else:
+            execution = execution_data
+        return cls(
+            draft_id=data["draft_id"],
+            name=data.get("name", ""),
+            source_type=data.get("source_type", ""),
+            source_ref=data.get("source_ref", ""),
+            target_status=data.get("target_status", ""),
+            handler=data.get("handler", ""),
+            remark=data.get("remark", ""),
+            created_at=data.get("created_at", ""),
+            created_by=data.get("created_by", ""),
+            status=data.get("status", "pending"),
+            items=items,
+            execution=execution
+        )
+
+
 @dataclass
 class ImportLogEntry:
     """导入日志条目"""
@@ -141,10 +243,23 @@ class ReviewLogEntry:
     timestamp: str = ""
     batch_id: str = ""
     parent_log_id: str = ""
+    draft_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ReviewLogEntry":
-        return cls(**data)
+        return cls(
+            log_id=data.get("log_id", ""),
+            log_type=data.get("log_type", "review"),
+            defect_id=data.get("defect_id", ""),
+            from_status=data.get("from_status", ""),
+            to_status=data.get("to_status", ""),
+            handler=data.get("handler", ""),
+            remark=data.get("remark", ""),
+            timestamp=data.get("timestamp", ""),
+            batch_id=data.get("batch_id", ""),
+            parent_log_id=data.get("parent_log_id", ""),
+            draft_id=data.get("draft_id", "")
+        )

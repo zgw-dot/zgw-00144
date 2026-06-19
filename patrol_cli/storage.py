@@ -1,12 +1,11 @@
 """数据持久化模块 - JSON 存储"""
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, SourceRow, ImportLogEntry, ReviewLogEntry
+from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry
 
 
 class PatrolState:
@@ -21,6 +20,7 @@ class PatrolState:
         self.meta_file = self.data_dir / "meta.json"
         self.import_log_file = self.data_dir / "import_log.json"
         self.review_log_file = self.data_dir / "review_log.json"
+        self.drafts_file = self.data_dir / "drafts.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
@@ -28,6 +28,7 @@ class PatrolState:
         self.imported_files: List[str] = []
         self.import_logs: List[ImportLogEntry] = []
         self.review_logs: List[ReviewLogEntry] = []
+        self.drafts: Dict[str, DraftEntry] = {}
 
         self._load()
 
@@ -60,6 +61,13 @@ class PatrolState:
                 review_data = json.load(f)
                 self.review_logs = [ReviewLogEntry.from_dict(d) for d in review_data]
 
+        if self.drafts_file.exists():
+            with open(self.drafts_file, "r", encoding="utf-8") as f:
+                drafts_data = json.load(f)
+                self.drafts = {}
+                for draft_id, draft_data in drafts_data.items():
+                    self.drafts[draft_id] = DraftEntry.from_dict(draft_data)
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -82,6 +90,7 @@ class PatrolState:
 
         self.save_import_logs()
         self.save_review_logs()
+        self.save_drafts()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -239,3 +248,48 @@ class PatrolState:
             "imported_files": len(self.imported_files),
             "undo_stack_size": len(self.undo_stack),
         }
+
+    def save_drafts(self):
+        """单独保存草稿"""
+        drafts_data = {
+            draft_id: draft.to_dict()
+            for draft_id, draft in self.drafts.items()
+        }
+        with open(self.drafts_file, "w", encoding="utf-8") as f:
+            json.dump(drafts_data, f, ensure_ascii=False, indent=2)
+
+    def add_draft(self, draft: DraftEntry):
+        """添加草稿"""
+        self.drafts[draft.draft_id] = draft
+
+    def get_draft(self, draft_id: str) -> Optional[DraftEntry]:
+        """获取草稿"""
+        return self.drafts.get(draft_id)
+
+    def update_draft(self, draft: DraftEntry):
+        """更新草稿"""
+        if draft.draft_id in self.drafts:
+            self.drafts[draft.draft_id] = draft
+
+    def list_drafts(
+        self,
+        status: Optional[str] = None,
+        limit: int = 0
+    ) -> List[DraftEntry]:
+        """列出草稿，按创建时间倒序"""
+        drafts = list(self.drafts.values())
+        drafts.sort(key=lambda d: d.created_at, reverse=True)
+        if status:
+            drafts = [d for d in drafts if d.status == status]
+        if limit > 0:
+            drafts = drafts[:limit]
+        return drafts
+
+    def get_drafts_for_defect(self, defect_id: str) -> List[DraftEntry]:
+        """查询缺陷相关的草稿（包含该缺陷的草稿）"""
+        result = []
+        for draft in self.drafts.values():
+            if any(item.defect_id == defect_id for item in draft.items):
+                result.append(draft)
+        result.sort(key=lambda d: d.created_at, reverse=True)
+        return result

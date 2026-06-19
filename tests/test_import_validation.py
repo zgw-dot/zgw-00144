@@ -1,9 +1,6 @@
 """导入校验和回滚回归测试"""
 
-import os
 import json
-import tempfile
-import shutil
 from pathlib import Path
 
 import pytest
@@ -1632,3 +1629,968 @@ class TestReviewFullChain:
         assert "最近复核5_时间" in csv_content
         assert "复核员A" in csv_content
         assert "单条复核" in csv_content
+
+
+def write_defect_ids_csv(path, defect_ids):
+    """写入缺陷ID列表CSV"""
+    with open(path, "w", encoding="utf-8-sig") as f:
+        f.write("缺陷ID\n")
+        for did in defect_ids:
+            f.write(f"{did}\n")
+
+
+class TestDraftCreate:
+    """草稿创建测试"""
+
+    def test_create_draft_from_ids(self, config, state_with_data):
+        """从ID列表创建草稿"""
+        defects = state_with_data.list_defects()[:3]
+        defect_ids = [d.defect_id for d in defects]
+        ids_str = ",".join(defect_ids)
+
+        from patrol_cli.workflow import create_draft
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched",
+            name="测试草稿", handler="张工", remark="批量派单测试", created_by="testuser"
+        )
+
+        assert draft.draft_id.startswith("DRAFT-")
+        assert draft.name == "测试草稿"
+        assert draft.target_status == "dispatched"
+        assert draft.handler == "张工"
+        assert draft.remark == "批量派单测试"
+        assert draft.created_by == "testuser"
+        assert draft.status == "pending"
+        assert len(draft.items) == 3
+        assert draft.source_type == "ids"
+
+        for item, defect in zip(draft.items, defects):
+            assert item.defect_id == defect.defect_id
+            assert item.target_status == "dispatched"
+            assert item.defect_snapshot["status"] == defect.status
+
+    def test_create_draft_from_csv(self, config, state_with_data, tmp_path):
+        """从CSV创建草稿"""
+        defects = state_with_data.list_defects()[:2]
+        defect_ids = [d.defect_id for d in defects]
+
+        csv_path = tmp_path / "defect_ids.csv"
+        write_defect_ids_csv(csv_path, defect_ids)
+
+        from patrol_cli.workflow import create_draft
+
+        draft = create_draft(
+            state_with_data, str(csv_path), "csv", "closed",
+            name="CSV草稿", handler="李工"
+        )
+
+        assert draft.draft_id.startswith("DRAFT-")
+        assert draft.name == "CSV草稿"
+        assert draft.target_status == "closed"
+        assert draft.handler == "李工"
+        assert draft.status == "pending"
+        assert len(draft.items) == 2
+        assert draft.source_type == "csv"
+
+    def test_create_draft_deduplicates_ids(self, config, state_with_data):
+        """创建草稿时自动去重重复ID"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+        ids_str = f"{d1},{d2},{d1}"
+
+        from patrol_cli.workflow import create_draft
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        assert len(draft.items) == 2
+
+    def test_create_draft_rejects_nonexistent(self, config, state_with_data):
+        """创建草稿时如果所有ID都不存在则失败"""
+        fake_ids = "DEF-NOTEXIST-001,DEF-NOTEXIST-002"
+
+        from patrol_cli.workflow import create_draft, WorkflowError
+
+        with pytest.raises(WorkflowError) as excinfo:
+            create_draft(state_with_data, fake_ids, "ids", "dispatched")
+
+        assert "缺陷不存在" in str(excinfo.value)
+
+    def test_create_draft_invalid_status_rejected(self, config, state_with_data):
+        """创建草稿时无效状态被拒绝"""
+        defects = state_with_data.list_defects()[:1]
+        ids_str = defects[0].defect_id
+
+        from patrol_cli.workflow import create_draft, WorkflowError
+
+        with pytest.raises(WorkflowError) as excinfo:
+            create_draft(state_with_data, ids_str, "ids", "invalid_status")
+
+        assert "无效的目标状态" in str(excinfo.value)
+
+    def test_create_draft_persists_on_disk(self, config, temp_data_dir, tmp_path):
+        """草稿创建后持久化到磁盘，重启后仍在"""
+        state = PatrolState(data_dir=temp_data_dir)
+
+        csv_path = tmp_path / "persist_data.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,测试,2025-06-15 08:30:00,张三,1单元",
+            "2号楼,EL-002,elevator,按钮失灵,medium,测试,2025-06-16 09:00:00,李四,2单元",
+        ])
+        import_and_merge(str(csv_path), config, state, "BATCH-DRAFT-PERSIST")
+
+        defect_ids = [d.defect_id for d in state.list_defects()]
+        ids_str = ",".join(defect_ids)
+
+        from patrol_cli.workflow import create_draft
+
+        draft = create_draft(
+            state, ids_str, "ids", "dispatched", name="持久化草稿"
+        )
+        draft_id = draft.draft_id
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        loaded_draft = state2.get_draft(draft_id)
+
+        assert loaded_draft is not None
+        assert loaded_draft.draft_id == draft_id
+        assert loaded_draft.name == "持久化草稿"
+        assert loaded_draft.status == "pending"
+        assert len(loaded_draft.items) == 2
+
+    def test_create_draft_with_some_nonexistent_skips_them(self, config, state_with_data):
+        """创建草稿时部分ID不存在则跳过，只保留有效的"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+        fake_id = "DEF-NOTEXIST-001"
+        ids_str = f"{d1},{fake_id},{d2}"
+
+        from patrol_cli.workflow import create_draft
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        assert len(draft.items) == 2
+        item_ids = [item.defect_id for item in draft.items]
+        assert d1 in item_ids
+        assert d2 in item_ids
+        assert fake_id not in item_ids
+
+    def test_create_draft_saves_defect_snapshot(self, config, state_with_data):
+        """创建草稿时保存缺陷快照"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import review_defect, create_draft
+
+        review_defect(state_with_data, d1, "dispatched", handler="先改一条")
+
+        ids_str = f"{d1},{d2}"
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "closed"
+        )
+
+        items_by_id = {item.defect_id: item for item in draft.items}
+        assert items_by_id[d1].defect_snapshot["status"] == "dispatched"
+        assert items_by_id[d2].defect_snapshot["status"] == "pending"
+
+
+class TestDraftPreview:
+    """草稿预览测试"""
+
+    def test_preview_shows_will_change(self, config, state_with_data):
+        """预览显示将变更的记录"""
+        defects = state_with_data.list_defects()[:3]
+        defect_ids = [d.defect_id for d in defects]
+        ids_str = ",".join(defect_ids)
+
+        from patrol_cli.workflow import create_draft, preview_draft
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        preview = preview_draft(state_with_data, draft.draft_id)
+
+        assert preview["draft_id"] == draft.draft_id
+        assert len(preview["will_change"]) == 3
+        assert len(preview["same_status"]) == 0
+        assert len(preview["invalid_transition"]) == 0
+        assert len(preview["not_found"]) == 0
+
+        for item in preview["will_change"]:
+            assert item["current_status"] == "pending"
+            assert item["target_status"] == "dispatched"
+
+    def test_preview_shows_same_status(self, config, state_with_data):
+        """预览显示已是目标状态的记录"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import review_defect, create_draft, preview_draft
+
+        review_defect(state_with_data, d1, "dispatched")
+
+        ids_str = f"{d1},{d2}"
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        preview = preview_draft(state_with_data, draft.draft_id)
+
+        assert len(preview["will_change"]) == 1
+        assert len(preview["same_status"]) == 1
+        assert preview["same_status"][0]["defect_id"] == d1
+
+    def test_preview_shows_invalid_transition(self, config, state_with_data):
+        """预览显示状态转换不合法的记录"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import review_defect, create_draft, preview_draft
+
+        review_defect(state_with_data, d1, "closed")
+
+        ids_str = f"{d1},{d2}"
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "false_positive"
+        )
+
+        preview = preview_draft(state_with_data, draft.draft_id)
+
+        assert len(preview["will_change"]) == 1
+        assert len(preview["invalid_transition"]) == 1
+        assert preview["invalid_transition"][0]["defect_id"] == d1
+
+    def test_preview_nonexistent_draft_raises(self, config, state_with_data):
+        """预览不存在的草稿抛出异常"""
+        from patrol_cli.workflow import preview_draft, WorkflowError
+
+        with pytest.raises(WorkflowError) as excinfo:
+            preview_draft(state_with_data, "DRAFT-NOTEXIST")
+
+        assert "草稿不存在" in str(excinfo.value)
+
+
+class TestDraftConflictDetection:
+    """草稿冲突检测测试"""
+
+    def test_detects_status_change_after_draft_created(self, config, state_with_data):
+        """检测草稿创建后缺陷状态被修改的冲突"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import create_draft, review_defect, _check_draft_conflicts
+
+        ids_str = f"{d1},{d2}"
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        review_defect(state_with_data, d1, "false_positive")
+
+        conflicts, duplicates, not_found, invalid = _check_draft_conflicts(state_with_data, draft)
+
+        assert len(conflicts) == 1
+        assert d1 in conflicts[0]
+        assert "创建草稿时状态为pending" in conflicts[0]
+        assert "当前状态为false_positive" in conflicts[0]
+
+    def test_detects_duplicate_ids(self, config, state_with_data):
+        """检测重复的缺陷编号"""
+        defects = state_with_data.list_defects()[:1]
+        d1 = defects[0].defect_id
+
+        from patrol_cli.workflow import create_draft, _check_draft_conflicts
+        from patrol_cli.models import DraftItem
+
+        ids_str = d1
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        draft.items.append(DraftItem(defect_id=d1, target_status="dispatched", defect_snapshot={}))
+
+        conflicts, duplicates, not_found, invalid = _check_draft_conflicts(state_with_data, draft)
+
+        assert len(duplicates) == 1
+        assert d1 in duplicates
+
+    def test_detects_nonexistent_defect(self, config, state_with_data):
+        """检测不存在的缺陷"""
+        defects = state_with_data.list_defects()[:1]
+        d1 = defects[0].defect_id
+        fake_id = "DEF-NOTEXIST-001"
+
+        from patrol_cli.workflow import create_draft, _check_draft_conflicts
+        from patrol_cli.models import DraftItem
+
+        ids_str = d1
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        draft.items.append(DraftItem(
+            defect_id=fake_id, target_status="dispatched",
+            defect_snapshot={"status": "pending"}
+        ))
+
+        conflicts, duplicates, not_found, invalid = _check_draft_conflicts(state_with_data, draft)
+
+        assert len(not_found) == 1
+        assert fake_id in not_found
+
+    def test_detects_already_target_status(self, config, state_with_data):
+        """检测已经是目标状态的缺陷"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import create_draft, review_defect, _check_draft_conflicts
+
+        review_defect(state_with_data, d1, "dispatched")
+
+        ids_str = f"{d1},{d2}"
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+
+        conflicts, duplicates, not_found, invalid = _check_draft_conflicts(state_with_data, draft)
+
+        assert len(invalid) == 1
+        assert d1 in invalid[0]
+        assert "已经是" in invalid[0]
+
+
+class TestDraftExecute:
+    """草稿执行测试"""
+
+    def test_execute_draft_success(self, config, state_with_data):
+        """成功执行草稿"""
+        defects = state_with_data.list_defects()[:3]
+        defect_ids = [d.defect_id for d in defects]
+        ids_str = ",".join(defect_ids)
+
+        from patrol_cli.workflow import create_draft, execute_draft
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched",
+            handler="执行员", remark="执行测试"
+        )
+        draft_id = draft.draft_id
+
+        result = execute_draft(state_with_data, draft_id)
+
+        assert result.success_count == 3
+        assert result.executed_at != ""
+        assert result.execution_id != ""
+
+        draft_after = state_with_data.get_draft(draft_id)
+        assert draft_after.status == "executed"
+        assert draft_after.execution.success_count == 3
+
+        for defect_id in defect_ids:
+            assert state_with_data.get_defect(defect_id).status == "dispatched"
+
+    def test_execute_draft_is_atomic_on_conflict(self, config, state_with_data):
+        """有冲突时整批不执行，原子性保证"""
+        defects = state_with_data.list_defects()[:3]
+        d1, d2, d3 = [d.defect_id for d in defects]
+        ids_str = ",".join([d1, d2, d3])
+
+        from patrol_cli.workflow import create_draft, review_defect, execute_draft, WorkflowError
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+        draft_id = draft.draft_id
+
+        review_defect(state_with_data, d2, "closed")
+
+        defects_before = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        logs_before = len(state_with_data.review_logs)
+        undo_before = len(state_with_data.undo_stack)
+
+        with pytest.raises(WorkflowError) as excinfo:
+            execute_draft(state_with_data, draft_id)
+
+        assert "草稿执行冲突" in str(excinfo.value)
+        assert d2 in str(excinfo.value)
+
+        defects_after = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        assert defects_before == defects_after
+        assert len(state_with_data.review_logs) == logs_before
+        assert len(state_with_data.undo_stack) == undo_before
+
+        draft_after = state_with_data.get_draft(draft_id)
+        assert draft_after.status == "pending"
+
+    def test_execute_draft_reports_all_conflicts_at_once(self, config, state_with_data):
+        """一次报告所有冲突：重复、不存在、状态变化"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+        fake_id = "DEF-NOTEXIST-001"
+
+        from patrol_cli.workflow import create_draft, review_defect, execute_draft, WorkflowError
+        from patrol_cli.models import DraftItem
+
+        ids_str = f"{d1},{d2}"
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched"
+        )
+        draft.items.append(DraftItem(
+            defect_id=fake_id, target_status="dispatched",
+            defect_snapshot={"status": "pending"}
+        ))
+        draft.items.append(DraftItem(
+            defect_id=d1, target_status="dispatched",
+            defect_snapshot={"status": "pending"}
+        ))
+
+        review_defect(state_with_data, d2, "closed")
+
+        with pytest.raises(WorkflowError) as excinfo:
+            execute_draft(state_with_data, draft.draft_id)
+
+        error_msg = str(excinfo.value)
+        assert "重复的缺陷编号" in error_msg
+        assert "缺陷不存在" in error_msg
+        assert "可能已被他人修改" in error_msg
+
+    def test_cannot_execute_executed_draft(self, config, state_with_data):
+        """不能重复执行已执行的草稿"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, execute_draft, WorkflowError
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        execute_draft(state_with_data, draft.draft_id)
+
+        with pytest.raises(WorkflowError) as excinfo:
+            execute_draft(state_with_data, draft.draft_id)
+
+        assert "草稿已执行，不能重复执行" in str(excinfo.value)
+
+    def test_cannot_execute_voided_draft(self, config, state_with_data):
+        """不能执行已作废的草稿"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, void_draft, execute_draft, WorkflowError
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        void_draft(state_with_data, draft.draft_id, "不需要了")
+
+        with pytest.raises(WorkflowError) as excinfo:
+            execute_draft(state_with_data, draft.draft_id)
+
+        assert "草稿已作废，不能执行" in str(excinfo.value)
+
+    def test_execute_creates_draft_review_logs(self, config, state_with_data):
+        """执行草稿产生类型为 draft_review 的日志，带 draft_id"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+        ids_str = f"{d1},{d2}"
+
+        from patrol_cli.workflow import create_draft, execute_draft
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "closed",
+            handler="草稿员", remark="草稿执行"
+        )
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+
+        draft_logs = state_with_data.get_review_logs(log_type="draft_review")
+        assert len(draft_logs) == 2
+
+        for log in draft_logs:
+            assert log.draft_id == draft_id
+            assert log.from_status == "pending"
+            assert log.to_status == "closed"
+            assert log.handler == "草稿员"
+            assert log.remark == "草稿执行"
+
+    def test_execute_pushes_to_undo_stack(self, config, state_with_data):
+        """执行草稿推入撤销栈"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, execute_draft
+
+        undo_before = len(state_with_data.undo_stack)
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        execute_draft(state_with_data, draft.draft_id)
+
+        assert len(state_with_data.undo_stack) == undo_before + 1
+
+        last_undo = state_with_data.undo_stack[-1]
+        assert "执行草稿" in last_undo["action"]
+        assert draft.draft_id in last_undo["action"]
+
+
+class TestDraftVoid:
+    """草稿作废测试"""
+
+    def test_void_pending_draft(self, config, state_with_data):
+        """作废待执行的草稿"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, void_draft
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        draft_id = draft.draft_id
+
+        voided = void_draft(state_with_data, draft_id, "测试作废")
+
+        assert voided.status == "voided"
+        assert "测试作废" in voided.remark
+
+        loaded = state_with_data.get_draft(draft_id)
+        assert loaded.status == "voided"
+
+    def test_cannot_void_executed_draft(self, config, state_with_data):
+        """不能作废已执行的草稿"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, execute_draft, void_draft, WorkflowError
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        execute_draft(state_with_data, draft.draft_id)
+
+        with pytest.raises(WorkflowError) as excinfo:
+            void_draft(state_with_data, draft.draft_id)
+
+        assert "草稿已执行，不能作废" in str(excinfo.value)
+
+    def test_cannot_void_already_voided(self, config, state_with_data):
+        """不能重复作废"""
+        defects = state_with_data.list_defects()[:1]
+        ids_str = defects[0].defect_id
+
+        from patrol_cli.workflow import create_draft, void_draft, WorkflowError
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        void_draft(state_with_data, draft.draft_id)
+
+        with pytest.raises(WorkflowError) as excinfo:
+            void_draft(state_with_data, draft.draft_id)
+
+        assert "草稿已作废" in str(excinfo.value)
+
+    def test_void_persists_after_restart(self, config, temp_data_dir, tmp_path):
+        """作废状态重启后仍在"""
+        state = PatrolState(data_dir=temp_data_dir)
+        csv_path = tmp_path / "void_data.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,测试,2025-06-15 08:30:00,张三,1单元",
+        ])
+        import_and_merge(str(csv_path), config, state, "BATCH-VOID-TEST")
+
+        from patrol_cli.workflow import create_draft, void_draft
+
+        defect_id = state.list_defects()[0].defect_id
+        draft = create_draft(state, defect_id, "ids", "dispatched")
+        draft_id = draft.draft_id
+        void_draft(state, draft_id, "重启测试作废")
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        loaded = state2.get_draft(draft_id)
+        assert loaded.status == "voided"
+        assert "重启测试作废" in loaded.remark
+
+
+class TestDraftUndo:
+    """草稿执行撤销测试"""
+
+    def test_undo_draft_execution_rollbacks_status(self, config, state_with_data):
+        """撤销草稿执行回退缺陷状态"""
+        defects = state_with_data.list_defects()[:3]
+        defect_ids = [d.defect_id for d in defects]
+        ids_str = ",".join(defect_ids)
+
+        from patrol_cli.workflow import create_draft, execute_draft, undo_last
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "closed", handler="撤销测试"
+        )
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+
+        for did in defect_ids:
+            assert state_with_data.get_defect(did).status == "closed"
+
+        action = undo_last(state_with_data)
+        assert action is not None
+        assert "执行草稿" in action
+        assert draft_id in action
+
+        for did in defect_ids:
+            assert state_with_data.get_defect(did).status == "pending"
+
+    def test_undo_draft_preserves_draft_and_execution_record(self, config, state_with_data):
+        """撤销草稿执行不删除草稿和执行记录"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, execute_draft, undo_last
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+        undo_last(state_with_data)
+
+        draft_after = state_with_data.get_draft(draft_id)
+        assert draft_after is not None
+        assert draft_after.status == "executed"
+        assert draft_after.execution.executed_at != ""
+        assert draft_after.execution.undo_execution_id != ""
+        assert draft_after.execution.undo_at != ""
+
+    def test_undo_draft_creates_undo_logs_with_draft_id(self, config, state_with_data):
+        """撤销草稿执行产生的 undo 日志带 draft_id"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+        ids_str = f"{d1},{d2}"
+
+        from patrol_cli.workflow import create_draft, execute_draft, undo_last
+
+        draft = create_draft(state_with_data, ids_str, "ids", "closed")
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+
+        undo_logs_before = len(state_with_data.get_review_logs(log_type="undo"))
+        undo_last(state_with_data)
+        undo_logs_after = state_with_data.get_review_logs(log_type="undo")
+
+        assert len(undo_logs_after) == undo_logs_before + 2
+
+        for log in undo_logs_after[:2]:
+            assert log.draft_id == draft_id
+            assert log.from_status == "closed"
+            assert log.to_status == "pending"
+
+    def test_undo_draft_then_cannot_execute_again(self, config, state_with_data):
+        """撤销草稿执行后不能再次执行（草稿状态仍是 executed）"""
+        defects = state_with_data.list_defects()[:2]
+        ids_str = ",".join([d.defect_id for d in defects])
+
+        from patrol_cli.workflow import create_draft, execute_draft, undo_last, WorkflowError
+
+        draft = create_draft(state_with_data, ids_str, "ids", "dispatched")
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+        undo_last(state_with_data)
+
+        with pytest.raises(WorkflowError) as excinfo:
+            execute_draft(state_with_data, draft_id)
+
+        assert "草稿已执行，不能重复执行" in str(excinfo.value)
+
+
+class TestDraftExport:
+    """草稿导出测试"""
+
+    def test_export_draft_execution_result(self, config, state_with_data, tmp_path):
+        """导出草稿执行结果"""
+        defects = state_with_data.list_defects()[:3]
+        defect_ids = [d.defect_id for d in defects]
+        ids_str = ",".join(defect_ids)
+
+        from patrol_cli.workflow import create_draft, execute_draft
+        from patrol_cli.exporter import export_draft_csv
+
+        draft = create_draft(
+            state_with_data, ids_str, "ids", "dispatched",
+            name="导出测试草稿", handler="导出员", remark="导出测试备注"
+        )
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+
+        output_path = tmp_path / "draft_result.csv"
+        count = export_draft_csv(state_with_data, draft_id, str(output_path))
+
+        assert count == 3
+
+        with open(output_path, "r", encoding="utf-8-sig") as f:
+            lines = f.readlines()
+
+        assert len(lines) == 4
+        header = lines[0]
+        assert "草稿ID" in header
+        assert "草稿名称" in header
+        assert "目标状态" in header
+        assert "处理人" in header
+        assert "执行时间" in header
+        assert "撤销时间" in header
+        assert "缺陷ID" in header
+        assert "快照状态" in header
+        assert "当前状态" in header
+
+        data_content = "".join(lines[1:])
+        assert draft_id in data_content
+        assert "导出测试草稿" in data_content
+        assert "导出员" in data_content
+        assert "导出测试备注" in data_content
+        assert "已派单" in data_content
+
+    def test_export_draft_list(self, config, state_with_data, tmp_path):
+        """导出草稿列表"""
+        defects = state_with_data.list_defects()[:3]
+        d1, d2, d3 = defects[0].defect_id, defects[1].defect_id, defects[2].defect_id
+
+        from patrol_cli.workflow import create_draft, execute_draft, void_draft
+        from patrol_cli.exporter import export_draft_list_csv
+
+        draft1 = create_draft(state_with_data, d1, "ids", "dispatched", name="草稿1")
+        execute_draft(state_with_data, draft1.draft_id)
+
+        draft2 = create_draft(state_with_data, d2, "ids", "closed", name="草稿2")
+        void_draft(state_with_data, draft2.draft_id, "作废原因")
+
+        draft3 = create_draft(state_with_data, d3, "ids", "false_positive", name="草稿3")
+
+        output_path = tmp_path / "draft_list.csv"
+        count = export_draft_list_csv(state_with_data, str(output_path))
+
+        assert count == 3
+
+        with open(output_path, "r", encoding="utf-8-sig") as f:
+            lines = f.readlines()
+
+        assert len(lines) == 4
+        header = lines[0]
+        assert "草稿ID" in header
+        assert "名称" in header
+        assert "状态" in header
+        assert "目标状态" in header
+        assert "创建时间" in header
+        assert "执行时间" in header
+        assert "撤销时间" in header
+        assert "成功条数" in header
+
+        data_content = "".join(lines[1:])
+        assert "草稿1" in data_content
+        assert "草稿2" in data_content
+        assert "草稿3" in data_content
+        assert "已执行" in data_content
+        assert "已作废" in data_content
+        assert "待执行" in data_content
+
+    def test_export_draft_list_filter_by_status(self, config, state_with_data, tmp_path):
+        """按状态筛选导出草稿列表"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import create_draft, execute_draft
+        from patrol_cli.exporter import export_draft_list_csv
+
+        create_draft(state_with_data, d1, "ids", "dispatched", name="草稿待执行")
+        draft_executed = create_draft(state_with_data, d2, "ids", "closed", name="草稿已执行")
+        execute_draft(state_with_data, draft_executed.draft_id)
+
+        output_path = tmp_path / "draft_executed.csv"
+        count = export_draft_list_csv(state_with_data, str(output_path), status="executed")
+
+        assert count == 1
+
+        with open(output_path, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+
+        assert "草稿已执行" in content
+        assert "草稿待执行" not in content
+
+
+class TestDraftTraceability:
+    """草稿来源追溯测试"""
+
+    def test_review_log_shows_draft_origin(self, config, state_with_data):
+        """复核日志显示草稿来源"""
+        defects = state_with_data.list_defects()[:2]
+        d1, d2 = defects[0].defect_id, defects[1].defect_id
+
+        from patrol_cli.workflow import create_draft, execute_draft
+
+        draft = create_draft(
+            state_with_data, f"{d1},{d2}", "ids", "dispatched",
+            name="追溯测试草稿"
+        )
+        draft_id = draft.draft_id
+
+        execute_draft(state_with_data, draft_id)
+
+        log_d1 = state_with_data.get_last_review_log(defect_id=d1)
+        assert log_d1 is not None
+        assert log_d1.draft_id == draft_id
+        assert log_d1.log_type == "draft_review"
+
+        log_d2 = state_with_data.get_last_review_log(defect_id=d2)
+        assert log_d2 is not None
+        assert log_d2.draft_id == draft_id
+
+    def test_defect_drafts_query(self, config, state_with_data):
+        """查询缺陷关联的所有草稿"""
+        defects = state_with_data.list_defects()[:3]
+        d1, d2, d3 = defects[0].defect_id, defects[1].defect_id, defects[2].defect_id
+
+        from patrol_cli.workflow import create_draft
+
+        draft1 = create_draft(state_with_data, f"{d1},{d2}", "ids", "dispatched", name="草稿A")
+        draft2 = create_draft(state_with_data, f"{d2},{d3}", "ids", "closed", name="草稿B")
+
+        drafts_for_d1 = state_with_data.get_drafts_for_defect(d1)
+        assert len(drafts_for_d1) == 1
+        assert drafts_for_d1[0].draft_id == draft1.draft_id
+
+        drafts_for_d2 = state_with_data.get_drafts_for_defect(d2)
+        assert len(drafts_for_d2) == 2
+        draft_ids = [d.draft_id for d in drafts_for_d2]
+        assert draft1.draft_id in draft_ids
+        assert draft2.draft_id in draft_ids
+
+        drafts_for_d3 = state_with_data.get_drafts_for_defect(d3)
+        assert len(drafts_for_d3) == 1
+        assert drafts_for_d3[0].draft_id == draft2.draft_id
+
+
+class TestDraftFullChain:
+    """草稿全链路回归测试"""
+
+    def test_full_chain_create_preview_execute_undo_restart_export(self, config, temp_data_dir, tmp_path):
+        """全链路：创建草稿→预览→冲突检查→执行→撤销→重启查询→导出"""
+        state = PatrolState(data_dir=temp_data_dir)
+
+        csv_data = tmp_path / "full_chain_data.csv"
+        write_csv(csv_data, [
+            "1号楼,EL-001,elevator,门机故障,critical,测试1,2025-06-15 08:30:00,张三,1单元",
+            "2号楼,EL-002,elevator,按钮失灵,medium,测试2,2025-06-16 09:00:00,李四,2单元",
+            "3号楼,EL-003,elevator,光幕故障,high,测试3,2025-06-17 10:00:00,王五,3单元",
+            "4号楼,EL-004,elevator,轿厢异响,critical,测试4,2025-06-18 11:00:00,赵六,4单元",
+        ])
+        import_and_merge(str(csv_data), config, state, "BATCH-DRAFT-FULL")
+
+        defects = state.list_defects()
+        d1, d2, d3, d4 = [d.defect_id for d in defects]
+
+        from patrol_cli.workflow import (
+            create_draft, preview_draft, execute_draft, undo_last,
+            review_defect, WorkflowError
+        )
+
+        ids_str = f"{d1},{d2},{d3}"
+        draft = create_draft(
+            state, ids_str, "ids", "dispatched",
+            name="全链路测试草稿", handler="全链路员",
+            remark="全链路测试备注", created_by="tester"
+        )
+        draft_id = draft.draft_id
+
+        preview = preview_draft(state, draft_id)
+        assert preview["total_items"] == 3
+        assert len(preview["will_change"]) == 3
+        assert len(preview["not_found"]) == 0
+
+        review_defect(state, d2, "closed", handler="别人先改了")
+
+        with pytest.raises(WorkflowError) as excinfo:
+            execute_draft(state, draft_id)
+        assert "冲突" in str(excinfo.value)
+
+        assert state.get_defect(d1).status == "pending"
+        assert state.get_defect(d2).status == "closed"
+        assert state.get_defect(d3).status == "pending"
+
+        review_defect(state, d2, "pending")
+
+        result = execute_draft(state, draft_id)
+        assert result.success_count == 3
+
+        assert state.get_defect(d1).status == "dispatched"
+        assert state.get_defect(d2).status == "dispatched"
+        assert state.get_defect(d3).status == "dispatched"
+
+        draft_after_exec = state.get_draft(draft_id)
+        assert draft_after_exec.status == "executed"
+        assert draft_after_exec.execution.success_count == 3
+
+        draft_logs = state.get_review_logs(log_type="draft_review")
+        assert len(draft_logs) == 3
+        for log in draft_logs:
+            assert log.draft_id == draft_id
+
+        action = undo_last(state)
+        assert "执行草稿" in action
+        assert draft_id in action
+
+        assert state.get_defect(d1).status == "pending"
+        assert state.get_defect(d2).status == "pending"
+        assert state.get_defect(d3).status == "pending"
+
+        draft_after_undo = state.get_draft(draft_id)
+        assert draft_after_undo.status == "executed"
+        assert draft_after_undo.execution.undo_execution_id != ""
+        assert draft_after_undo.execution.undo_at != ""
+
+        undo_logs = state.get_review_logs(log_type="undo")
+        draft_undo_logs = [log for log in undo_logs if log.draft_id == draft_id]
+        assert len(draft_undo_logs) == 3
+
+        state_reload = PatrolState(data_dir=temp_data_dir)
+
+        draft_reload = state_reload.get_draft(draft_id)
+        assert draft_reload is not None
+        assert draft_reload.status == "executed"
+        assert draft_reload.execution.undo_execution_id != ""
+        assert draft_reload.execution.undo_at != ""
+        assert draft_reload.execution.success_count == 3
+
+        assert state_reload.get_defect(d1).status == "pending"
+
+        drafts_for_d1 = state_reload.get_drafts_for_defect(d1)
+        assert len(drafts_for_d1) == 1
+        assert drafts_for_d1[0].draft_id == draft_id
+
+        from patrol_cli.exporter import export_draft_csv, export_draft_list_csv, export_html
+
+        result_csv = tmp_path / "full_chain_result.csv"
+        count = export_draft_csv(state_reload, draft_id, str(result_csv))
+        assert count == 3
+
+        with open(result_csv, "r", encoding="utf-8-sig") as f:
+            content = f.read()
+        assert draft_id in content
+        assert "全链路测试草稿" in content
+        assert "全链路员" in content
+        assert "全链路测试备注" in content
+
+        list_csv = tmp_path / "full_chain_list.csv"
+        count = export_draft_list_csv(state_reload, str(list_csv))
+        assert count >= 1
+
+        html_path = tmp_path / "full_chain.html"
+        export_html(state_reload, str(html_path), config)
+
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+        assert "草稿复核" in html_content
+        assert draft_id in html_content
+        assert "全链路测试草稿" in html_content
+
+        drafts_pending = state_reload.list_drafts(status="pending")
+        drafts_executed = state_reload.list_drafts(status="executed")
+        drafts_voided = state_reload.list_drafts(status="voided")
+
+        assert len(drafts_executed) == 1
+        assert drafts_executed[0].draft_id == draft_id

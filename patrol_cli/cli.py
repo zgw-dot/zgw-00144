@@ -3,14 +3,17 @@
 import click
 import sys
 from datetime import datetime
-from pathlib import Path
 
 from .config import load_rules
 from .storage import PatrolState
 from .models import STATUS_NAMES
 from .merger import import_and_merge, preview_import
-from .workflow import review_defect, undo_last, batch_review, WorkflowError
-from .exporter import export_csv, export_csv_with_sources, export_html
+from .workflow import (
+    review_defect, undo_last, batch_review, WorkflowError,
+    create_draft, preview_draft, execute_draft, void_draft
+)
+from .models import DRAFT_STATUS_NAMES
+from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv
 
 
 DEFAULT_CONFIG = "examples/rules.yaml"
@@ -216,7 +219,7 @@ def preview(ctx, csv_file, batch):
 
         click.echo(f"\n批次号: {batch}")
         click.echo(f"数据目录: {ctx.obj['data_dir']}")
-        click.echo(f"模式: 预检 (不落盘)")
+        click.echo("模式: 预检 (不落盘)")
     except FileNotFoundError as e:
         click.echo(click.style(f"错误: {e}", fg="red"), err=True)
         sys.exit(1)
@@ -298,6 +301,7 @@ def review_log_cmd(ctx, limit, defect_id, handler, log_type):
     type_labels = {
         "review": "单条复核",
         "batch_review": "批量复核",
+        "draft_review": "草稿复核",
         "undo": "撤销"
     }
 
@@ -306,6 +310,7 @@ def review_log_cmd(ctx, limit, defect_id, handler, log_type):
         type_color = {
             "review": "cyan",
             "batch_review": "blue",
+            "draft_review": "magenta",
             "undo": "yellow"
         }.get(log.log_type, "white")
 
@@ -338,6 +343,10 @@ def review_log_cmd(ctx, limit, defect_id, handler, log_type):
                 click.echo(f"    备注: {log.remark}")
             if log.parent_log_id:
                 click.echo(f"    批次组: {log.parent_log_id}")
+            if log.draft_id:
+                draft = state.get_draft(log.draft_id)
+                draft_name = draft.name if draft else log.draft_id
+                click.echo(f"    草稿: {log.draft_id} ({draft_name})")
         click.echo()
 
     total_all = len(state.review_logs)
@@ -474,15 +483,19 @@ def undo(ctx):
 
 
 @cli.command()
-@click.argument("format", type=click.Choice(["csv", "csv-detail", "html"]))
+@click.argument("format", type=click.Choice(["csv", "csv-detail", "html", "draft-csv", "draft-list-csv"]))
 @click.option("--output", "-o", default=None, help="输出文件路径")
 @click.option("--status", "-s", default=None,
               type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
               help="按状态筛选")
 @click.option("--building", default=None, help="按楼栋筛选")
+@click.option("--draft-id", default=None, help="草稿ID（用于 draft-csv 格式）")
+@click.option("--draft-status", default=None,
+              type=click.Choice(["pending", "executed", "voided"]),
+              help="按草稿状态筛选（用于 draft-list-csv 格式）")
 @click.pass_context
-def export(ctx, format, output, status, building):
-    """导出报告 (csv / csv-detail / html)"""
+def export(ctx, format, output, status, building, draft_id, draft_status):
+    """导出报告 (csv / csv-detail / html / draft-csv / draft-list-csv)"""
     state = _get_state(ctx.obj["data_dir"])
     config = ctx.obj["config"]
 
@@ -498,6 +511,13 @@ def export(ctx, format, output, status, building):
             count = export_csv_with_sources(state, output, status=status)
         elif format == "html":
             count = export_html(state, output, config=config, status=status, building=building)
+        elif format == "draft-csv":
+            if not draft_id:
+                click.echo(click.style("错误: 导出草稿执行结果必须指定 --draft-id", fg="red"), err=True)
+                sys.exit(1)
+            count = export_draft_csv(state, draft_id, output)
+        elif format == "draft-list-csv":
+            count = export_draft_list_csv(state, output, status=draft_status)
         else:
             click.echo(click.style(f"不支持的格式: {format}", fg="red"), err=True)
             sys.exit(1)
@@ -506,6 +526,276 @@ def export(ctx, format, output, status, building):
         click.echo(f"  记录数: {count}")
     except Exception as e:
         click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@cli.group()
+@click.pass_context
+def draft(ctx):
+    """复核方案草稿管理"""
+    pass
+
+
+@draft.command("create")
+@click.option("--ids", "defect_ids", default=None, help="逗号分隔的缺陷ID列表")
+@click.option("--csv", "csv_path", type=click.Path(exists=True), default=None, help="CSV文件路径")
+@click.option("--status", "-s", required=True,
+              type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
+              help="目标状态")
+@click.option("--name", "-n", default="", help="草稿名称")
+@click.option("--handler", "-H", default="", help="处理人")
+@click.option("--remark", "-r", default="", help="备注")
+@click.option("--created-by", default="", help="创建人")
+@click.pass_context
+def draft_create(ctx, defect_ids, csv_path, status, name, handler, remark, created_by):
+    """创建复核方案草稿"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    if not defect_ids and not csv_path:
+        click.echo(click.style("错误: 必须指定 --ids 或 --csv", fg="red"), err=True)
+        sys.exit(1)
+
+    if defect_ids and csv_path:
+        click.echo(click.style("错误: --ids 和 --csv 不能同时使用", fg="red"), err=True)
+        sys.exit(1)
+
+    try:
+        if csv_path:
+            draft = create_draft(
+                state, csv_path, "csv", status,
+                name=name, handler=handler, remark=remark, created_by=created_by
+            )
+        else:
+            draft = create_draft(
+                state, defect_ids, "ids", status,
+                name=name, handler=handler, remark=remark, created_by=created_by
+            )
+
+        status_name = STATUS_NAMES.get(status, status)
+        click.echo(click.style(f"草稿创建成功: {draft.draft_id}", fg="green"))
+        click.echo(f"  名称: {draft.name}")
+        click.echo(f"  目标状态: {status_name}")
+        click.echo(f"  包含缺陷: {len(draft.items)} 条")
+        if handler:
+            click.echo(f"  处理人: {handler}")
+        if remark:
+            click.echo(f"  备注: {remark}")
+        click.echo(f"  创建时间: {draft.created_at[:19]}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@draft.command("preview")
+@click.argument("draft_id")
+@click.pass_context
+def draft_preview(ctx, draft_id):
+    """预览草稿影响的记录"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        preview = preview_draft(state, draft_id)
+
+        status_name = STATUS_NAMES.get(preview["target_status"], preview["target_status"])
+        click.echo(click.style(f"=== 草稿预览: {preview['name']} ===", bold=True, fg="cyan"))
+        click.echo(f"草稿ID: {preview['draft_id']}")
+        click.echo(f"目标状态: {status_name}")
+        click.echo(f"创建时间: {preview['created_at'][:19]}")
+        click.echo(f"总条目数: {preview['total_items']}")
+        if preview["handler"]:
+            click.echo(f"处理人: {preview['handler']}")
+        if preview["remark"]:
+            click.echo(f"备注: {preview['remark']}")
+        click.echo()
+
+        if preview["will_change"]:
+            click.echo(click.style(f"将变更 {len(preview['will_change'])} 条:", fg="green", bold=True))
+            for item in preview["will_change"]:
+                from_name = STATUS_NAMES.get(item["current_status"], item["current_status"])
+                to_name = STATUS_NAMES.get(item["target_status"], item["target_status"])
+                click.echo(f"  {item['defect_id']}: {item['building']} {item['device_id']} "
+                           f"{from_name} {_sym('arrow')} {to_name} - {item['description'][:30]}")
+            click.echo()
+
+        if preview["same_status"]:
+            click.echo(click.style(f"已是目标状态 {len(preview['same_status'])} 条:", fg="yellow"))
+            for item in preview["same_status"]:
+                status_name = STATUS_NAMES.get(item["current_status"], item["current_status"])
+                click.echo(f"  {item['defect_id']}: {item['building']} {item['device_id']} "
+                           f"- {status_name} - {item['description'][:30]}")
+            click.echo()
+
+        if preview["invalid_transition"]:
+            click.echo(click.style(f"状态转换不合法 {len(preview['invalid_transition'])} 条:", fg="red"))
+            for item in preview["invalid_transition"]:
+                from_name = STATUS_NAMES.get(item["current_status"], item["current_status"])
+                to_name = STATUS_NAMES.get(item["target_status"], item["target_status"])
+                click.echo(f"  {item['defect_id']}: {from_name} {_sym('arrow')} {to_name} 不允许")
+            click.echo()
+
+        if preview["not_found"]:
+            click.echo(click.style(f"缺陷不存在 {len(preview['not_found'])} 条:", fg="red"))
+            for did in preview["not_found"]:
+                click.echo(f"  {did}")
+            click.echo()
+
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@draft.command("execute")
+@click.argument("draft_id")
+@click.pass_context
+def draft_execute(ctx, draft_id):
+    """执行草稿（原子执行）"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        result = execute_draft(state, draft_id)
+        draft = state.get_draft(draft_id)
+        if draft:
+            status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
+            click.echo(click.style(
+                f"草稿执行成功: {draft.name} ({draft_id})",
+                fg="green", bold=True
+            ))
+            click.echo(f"  执行批次: {result.execution_id}")
+            click.echo(f"  执行时间: {result.executed_at[:19]}")
+            click.echo(f"  成功处理: {result.success_count} 条 → {status_name}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@draft.command("list")
+@click.option("--status", "-s", default=None,
+              type=click.Choice(["pending", "executed", "voided"]),
+              help="按状态筛选")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.pass_context
+def draft_list(ctx, status, limit):
+    """列出草稿"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    drafts = state.list_drafts(status=status, limit=limit)
+
+    if not drafts:
+        click.echo("暂无草稿")
+        return
+
+    click.echo(click.style(f"=== 草稿列表 (最近 {len(drafts)} 条) ===", bold=True))
+    click.echo()
+
+    for i, draft in enumerate(drafts, 1):
+        status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
+        status_color = {
+            "pending": "yellow",
+            "executed": "green",
+            "voided": "bright_black"
+        }.get(draft.status, "white")
+
+        target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
+
+        click.echo(f"[{i}] {click.style(status_name, fg=status_color)} "
+                   f"{click.style(draft.draft_id, fg='cyan')} "
+                   f"- {draft.name}")
+        click.echo(f"    创建时间: {draft.created_at[:19]}  "
+                   f"目标: {target_status_name}  "
+                   f"条目: {len(draft.items)}条")
+        if draft.handler:
+            click.echo(f"    处理人: {draft.handler}")
+        if draft.status == "executed" and draft.execution.executed_at:
+            click.echo(f"    执行时间: {draft.execution.executed_at[:19]}  "
+                       f"成功: {draft.execution.success_count}条")
+            if draft.execution.undo_at:
+                click.echo(f"    撤销时间: {draft.execution.undo_at[:19]}")
+        if draft.status == "voided":
+            click.echo(f"    {draft.remark}")
+        click.echo()
+
+    total_all = len(state.drafts)
+    if total_all > limit:
+        click.echo(f"... 还有 {total_all - limit} 条历史记录")
+
+
+@draft.command("show")
+@click.argument("draft_id")
+@click.pass_context
+def draft_show(ctx, draft_id):
+    """显示草稿详情"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    draft = state.get_draft(draft_id)
+    if not draft:
+        click.echo(click.style(f"草稿不存在: {draft_id}", fg="red"), err=True)
+        sys.exit(1)
+
+    status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
+    status_color = {
+        "pending": "yellow",
+        "executed": "green",
+        "voided": "bright_black"
+    }.get(draft.status, "white")
+
+    target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
+
+    click.echo(click.style(f"=== {draft.name} ===", bold=True, fg="cyan"))
+    click.echo(f"草稿ID: {draft.draft_id}")
+    click.echo(f"状态: {click.style(status_name, fg=status_color)}")
+    click.echo(f"来源: {draft.source_type} - {draft.source_ref}")
+    click.echo(f"目标状态: {target_status_name}")
+    click.echo(f"创建时间: {draft.created_at[:19]}")
+    if draft.created_by:
+        click.echo(f"创建人: {draft.created_by}")
+    if draft.handler:
+        click.echo(f"处理人: {draft.handler}")
+    if draft.remark:
+        click.echo(f"备注: {draft.remark}")
+    click.echo()
+
+    if draft.status == "executed":
+        click.echo(click.style("=== 执行信息 ===", bold=True))
+        click.echo(f"执行ID: {draft.execution.execution_id}")
+        click.echo(f"执行时间: {draft.execution.executed_at[:19]}")
+        click.echo(f"成功条数: {draft.execution.success_count}")
+        if draft.execution.undo_at:
+            click.echo(click.style("已撤销", fg="yellow"))
+            click.echo(f"撤销时间: {draft.execution.undo_at[:19]}")
+            click.echo(f"撤销执行ID: {draft.execution.undo_execution_id}")
+        click.echo()
+
+    click.echo(click.style(f"=== 包含缺陷 ({len(draft.items)} 条) ===", bold=True))
+    for i, item in enumerate(draft.items, 1):
+        snapshot = item.defect_snapshot
+        snap_status = STATUS_NAMES.get(snapshot.get("status", ""), snapshot.get("status", ""))
+        click.echo(f"{i}. {item.defect_id}: "
+                   f"{snapshot.get('building', '')} "
+                   f"{snapshot.get('device_id', '')} "
+                   f"[{snap_status}] "
+                   f"{snapshot.get('description', '')[:40]}")
+        current = state.get_defect(item.defect_id)
+        if current:
+            current_status = STATUS_NAMES.get(current.status, current.status)
+            if current.status != snapshot.get("status", ""):
+                click.echo(f"   ⚠ 当前状态: {current_status}（与快照不一致）")
+
+
+@draft.command("void")
+@click.argument("draft_id")
+@click.option("--reason", "-r", default="", help="作废原因")
+@click.pass_context
+def draft_void(ctx, draft_id, reason):
+    """作废草稿"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        draft = void_draft(state, draft_id, reason)
+        click.echo(click.style(f"草稿已作废: {draft.name} ({draft.draft_id})", fg="green"))
+        if reason:
+            click.echo(f"原因: {reason}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
         sys.exit(1)
 
 
@@ -536,6 +826,15 @@ def stats(ctx):
     click.echo(f"已导入文件: {s['imported_files']} 个")
     click.echo(f"撤销栈深度: {s['undo_stack_size']}")
     click.echo(f"导入日志: {len(state.import_logs)} 条")
+    if state.drafts:
+        draft_stats = {"pending": 0, "executed": 0, "voided": 0}
+        for draft in state.drafts.values():
+            draft_stats[draft.status] = draft_stats.get(draft.status, 0) + 1
+        click.echo()
+        click.echo("草稿:")
+        for st, name in DRAFT_STATUS_NAMES.items():
+            count = draft_stats.get(st, 0)
+            click.echo(f"  {name}: {count}")
     click.echo(f"数据目录: {ctx.obj['data_dir']}")
 
 
@@ -590,11 +889,13 @@ def show(ctx, defect_id):
         type_labels = {
             "review": "单条复核",
             "batch_review": "批量复核",
+            "draft_review": "草稿复核",
             "undo": "撤销"
         }
         type_colors = {
             "review": "cyan",
             "batch_review": "blue",
+            "draft_review": "magenta",
             "undo": "yellow"
         }
         for i, log in enumerate(review_logs_defect, 1):
@@ -611,6 +912,32 @@ def show(ctx, defect_id):
                 click.echo(f"      批次: {log.batch_id}")
             if log.parent_log_id:
                 click.echo(f"      批次组: {log.parent_log_id}")
+            if log.draft_id:
+                draft = state.get_draft(log.draft_id)
+                draft_name = draft.name if draft else log.draft_id
+                click.echo(f"      草稿来源: {log.draft_id} ({draft_name})")
+
+    drafts_for_defect = state.get_drafts_for_defect(defect_id)
+    if drafts_for_defect:
+        click.echo()
+        click.echo(f"关联草稿 ({len(drafts_for_defect)} 个):")
+        for i, draft in enumerate(drafts_for_defect, 1):
+            status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
+            status_color = {
+                "pending": "yellow",
+                "executed": "green",
+                "voided": "bright_black"
+            }.get(draft.status, "white")
+            target_status = STATUS_NAMES.get(draft.target_status, draft.target_status)
+            click.echo(f"  [{i}] {click.style(draft.draft_id, fg='cyan')} "
+                       f"{click.style(status_name, fg=status_color)} "
+                       f"- {draft.name}")
+            click.echo(f"      创建: {draft.created_at[:19]}  目标: {target_status}")
+            if draft.status == "executed":
+                if draft.execution.undo_at:
+                    click.echo(f"      执行: {draft.execution.executed_at[:19]} (已撤销)")
+                else:
+                    click.echo(f"      执行: {draft.execution.executed_at[:19]}")
 
 
 def main():

@@ -1,11 +1,10 @@
 """导出模块 - CSV 和 HTML 报告"""
 
 import csv
-from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime
 
-from .models import DefectRecord, STATUS_NAMES
+from .models import STATUS_NAMES, DRAFT_STATUS_NAMES
 from .config import RulesConfig
 from .storage import PatrolState
 
@@ -272,13 +271,14 @@ def export_html(
     recent_reviews_html = ""
     recent_reviews = state.get_review_logs(limit=5)
     if recent_reviews:
-        type_labels = {"review": "单条复核", "batch_review": "批量复核", "undo": "撤销"}
+        type_labels = {"review": "单条复核", "batch_review": "批量复核", "draft_review": "草稿复核", "undo": "撤销"}
         review_rows = []
         for log in recent_reviews:
             type_label = type_labels.get(log.log_type, log.log_type)
             type_badge_color = {
                 "review": "#3b82f6",
                 "batch_review": "#8b5cf6",
+                "draft_review": "#ec4899",
                 "undo": "#f59e0b"
             }.get(log.log_type, "#6b7280")
 
@@ -293,11 +293,17 @@ def export_html(
                 defect_text = log.defect_id
                 handler_text = log.handler or "-"
 
+            draft_info = ""
+            if log.draft_id:
+                draft = state.get_draft(log.draft_id)
+                draft_name = draft.name if draft else log.draft_id
+                draft_info = f"<br><small>草稿: {log.draft_id} ({draft_name})</small>"
+
             review_rows.append(f"""
             <tr>
               <td><span class="badge" style="background:{type_badge_color}">{type_label}</span></td>
               <td class="mono">{defect_text}</td>
-              <td>{status_text}</td>
+              <td>{status_text}{draft_info}</td>
               <td>{handler_text}</td>
               <td>{log.timestamp[:19] if log.timestamp else '-'}</td>
               <td>{log.remark if log.log_type != 'undo' else ''}</td>
@@ -415,3 +421,112 @@ function toggleDetail(id) {{
         f.write(html)
 
     return len(defects)
+
+
+def export_draft_csv(
+    state: PatrolState,
+    draft_id: str,
+    output_path: str
+) -> int:
+    """
+    导出草稿执行结果为 CSV。
+
+    包含草稿元信息和所有缺陷的处理结果。
+    """
+    draft = state.get_draft(draft_id)
+    if not draft:
+        raise ValueError(f"草稿不存在: {draft_id}")
+
+    if draft.status != "executed":
+        raise ValueError(f"草稿尚未执行，无法导出: {draft_id}")
+
+    fieldnames = [
+        "草稿ID", "草稿名称", "目标状态", "处理人", "备注",
+        "创建时间", "执行时间", "撤销时间",
+        "缺陷ID", "楼栋", "设备编号", "设备类别", "缺陷类型",
+        "严重等级", "快照状态", "当前状态", "描述"
+    ]
+
+    with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
+        undo_time = draft.execution.undo_at[:19] if draft.execution.undo_at else ""
+
+        for item in draft.items:
+            snapshot = item.defect_snapshot
+            current = state.get_defect(item.defect_id)
+            current_status = current.status if current else "已删除"
+            current_status_name = STATUS_NAMES.get(current_status, current_status)
+            snap_status_name = STATUS_NAMES.get(
+                snapshot.get("status", ""), snapshot.get("status", "")
+            )
+
+            writer.writerow({
+                "草稿ID": draft.draft_id,
+                "草稿名称": draft.name,
+                "目标状态": target_status_name,
+                "处理人": draft.handler,
+                "备注": draft.remark,
+                "创建时间": draft.created_at[:19],
+                "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
+                "撤销时间": undo_time,
+                "缺陷ID": item.defect_id,
+                "楼栋": snapshot.get("building", ""),
+                "设备编号": snapshot.get("device_id", ""),
+                "设备类别": snapshot.get("device_category", ""),
+                "缺陷类型": snapshot.get("defect_type", ""),
+                "严重等级": snapshot.get("severity", ""),
+                "快照状态": snap_status_name,
+                "当前状态": current_status_name,
+                "描述": snapshot.get("description", "")
+            })
+
+    return len(draft.items)
+
+
+def export_draft_list_csv(
+    state: PatrolState,
+    output_path: str,
+    status: Optional[str] = None
+) -> int:
+    """导出草稿列表为 CSV"""
+    drafts = state.list_drafts(status=status)
+
+    if not drafts:
+        return 0
+
+    fieldnames = [
+        "草稿ID", "名称", "状态", "来源类型", "来源引用",
+        "目标状态", "处理人", "备注", "创建人", "创建时间",
+        "条目数", "执行时间", "撤销时间", "成功条数"
+    ]
+
+    with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for draft in drafts:
+            status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
+            target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
+
+            writer.writerow({
+                "草稿ID": draft.draft_id,
+                "名称": draft.name,
+                "状态": status_name,
+                "来源类型": draft.source_type,
+                "来源引用": draft.source_ref,
+                "目标状态": target_status_name,
+                "处理人": draft.handler,
+                "备注": draft.remark,
+                "创建人": draft.created_by,
+                "创建时间": draft.created_at[:19] if draft.created_at else "",
+                "条目数": len(draft.items),
+                "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
+                "撤销时间": draft.execution.undo_at[:19] if draft.execution.undo_at else "",
+                "成功条数": draft.execution.success_count if draft.execution.success_count else 0
+            })
+
+    return len(drafts)
+
