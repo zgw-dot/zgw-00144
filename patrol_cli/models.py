@@ -118,6 +118,11 @@ def generate_audit_id() -> str:
     return f"AUDIT-{uuid.uuid4().hex[:12].upper()}"
 
 
+def generate_archive_id() -> str:
+    """生成档案 ID"""
+    return f"ARC-{uuid.uuid4().hex[:10].upper()}"
+
+
 DRAFT_STATUSES = ["pending", "executed", "voided"]
 DRAFT_STATUS_NAMES = {
     "pending": "待执行",
@@ -520,3 +525,149 @@ class ImportConflictResult:
             total_import_templates=data.get("total_import_templates", 0),
             total_import_versions=data.get("total_import_versions", 0)
         )
+
+
+@dataclass
+class TemplateArchive:
+    """模板档案 - 发布时固化的永久副本，不受模板改名/删除影响"""
+    archive_id: str = ""
+    template_id: str = ""
+    template_name: str = ""
+    version_name: str = ""
+    target_status: str = ""
+    handler: str = ""
+    remark: str = ""
+    source_type: str = ""
+    description: str = ""
+    template_snapshot: Dict[str, Any] = field(default_factory=dict)
+    published_at: str = ""
+    published_by: str = ""
+    archived_at: str = ""
+    archive_note: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TemplateArchive":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class ArchiveDiffItem:
+    field_name: str = ""
+    field_label: str = ""
+    old_value: str = ""
+    new_value: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ArchiveDiffItem":
+        return cls(**data)
+
+
+@dataclass
+class ArchiveCompareResult:
+    archive_a_id: str = ""
+    archive_a_name: str = ""
+    archive_b_id: str = ""
+    archive_b_name: str = ""
+    diffs: List[ArchiveDiffItem] = field(default_factory=list)
+    is_same: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "archive_a_id": self.archive_a_id,
+            "archive_a_name": self.archive_a_name,
+            "archive_b_id": self.archive_b_id,
+            "archive_b_name": self.archive_b_name,
+            "diffs": [d.to_dict() for d in self.diffs],
+            "is_same": self.is_same
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ArchiveCompareResult":
+        diffs = [ArchiveDiffItem.from_dict(d) for d in data.get("diffs", [])]
+        return cls(
+            archive_a_id=data.get("archive_a_id", ""),
+            archive_a_name=data.get("archive_a_name", ""),
+            archive_b_id=data.get("archive_b_id", ""),
+            archive_b_name=data.get("archive_b_name", ""),
+            diffs=diffs,
+            is_same=data.get("is_same", True)
+        )
+
+
+@dataclass
+class ArchiveRestorePreview:
+    archive_id: str = ""
+    version_name: str = ""
+    template_id: str = ""
+    template_name: str = ""
+    template_exists: bool = False
+    current_target_status: str = ""
+    current_handler: str = ""
+    current_remark: str = ""
+    current_source_type: str = ""
+    restore_target_status: str = ""
+    restore_handler: str = ""
+    restore_remark: str = ""
+    restore_source_type: str = ""
+    restore_action: str = ""
+    diffs: List[ArchiveDiffItem] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "archive_id": self.archive_id,
+            "version_name": self.version_name,
+            "template_id": self.template_id,
+            "template_name": self.template_name,
+            "template_exists": self.template_exists,
+            "current_target_status": self.current_target_status,
+            "current_handler": self.current_handler,
+            "current_remark": self.current_remark,
+            "current_source_type": self.current_source_type,
+            "restore_target_status": self.restore_target_status,
+            "restore_handler": self.restore_handler,
+            "restore_remark": self.restore_remark,
+            "restore_source_type": self.restore_source_type,
+            "restore_action": self.restore_action,
+            "diffs": [d.to_dict() for d in self.diffs]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ArchiveRestorePreview":
+        diffs = [ArchiveDiffItem.from_dict(d) for d in data.get("diffs", [])]
+        return cls(
+            archive_id=data.get("archive_id", ""),
+            version_name=data.get("version_name", ""),
+            template_id=data.get("template_id", ""),
+            template_name=data.get("template_name", ""),
+            template_exists=data.get("template_exists", False),
+            current_target_status=data.get("current_target_status", ""),
+            current_handler=data.get("current_handler", ""),
+            current_remark=data.get("current_remark", ""),
+            current_source_type=data.get("current_source_type", ""),
+            restore_target_status=data.get("restore_target_status", ""),
+            restore_handler=data.get("restore_handler", ""),
+            restore_remark=data.get("restore_remark", ""),
+            restore_source_type=data.get("restore_source_type", ""),
+            restore_action=data.get("restore_action", ""),
+            diffs=diffs
+        )
+
+
+@dataclass
+class ArchiveExportResult:
+    exported_archives: int = 0
+    exported_templates: int = 0
+    output_file: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ArchiveExportResult":
+        return cls(**data)

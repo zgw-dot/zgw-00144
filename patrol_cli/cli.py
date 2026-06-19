@@ -16,7 +16,10 @@ from .workflow import (
     snapshot_health_check, snapshot_patch,
     publish_version, list_versions, get_version, compare_versions,
     preview_restore_version, restore_version,
-    precheck_import_conflicts, import_with_versions, export_with_versions
+    precheck_import_conflicts, import_with_versions, export_with_versions,
+    list_archives, get_archive, compare_archives,
+    preview_restore_archive, restore_archive,
+    export_archives, import_archives, precheck_archive_import
 )
 from .models import DRAFT_STATUS_NAMES
 from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv, export_health_check_csv, export_health_check_json
@@ -1942,6 +1945,293 @@ def version_export(ctx, output_file, ids):
         click.echo(f"  版本数量: {versions_count}")
     except Exception as e:
         click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@cli.group()
+@click.pass_context
+def archive(ctx):
+    """模板档案馆 - 永久固化的发布版本，不受模板改名/删除影响"""
+    pass
+
+
+@archive.command("list")
+@click.option("--template", "-t", "template_id_or_name", default=None, help="按模板ID或名称筛选")
+@click.option("--template-name", default=None, help="按档案中保存的模板名筛选（模板删除后仍可用）")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.pass_context
+def archive_list(ctx, template_id_or_name, template_name, limit):
+    """列出档案（模板删除后仍可查询）"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    if template_name:
+        archives = list_archives(state, template_name=template_name)
+    elif template_id_or_name:
+        tpl = state.get_template(template_id_or_name)
+        if not tpl:
+            tpl = state.get_template_by_name(template_id_or_name)
+        if tpl:
+            archives = list_archives(state, template_id=tpl.template_id)
+        else:
+            archives = list_archives(state, template_name=template_id_or_name)
+    else:
+        archives = list_archives(state)
+
+    if not archives:
+        click.echo("暂无档案记录")
+        return
+
+    display = archives[:limit]
+
+    click.echo(click.style(f"=== 档案列表 (共 {len(archives)} 条) ===", bold=True))
+    click.echo()
+
+    for i, arc in enumerate(display, 1):
+        status_name = STATUS_NAMES.get(arc.target_status, arc.target_status)
+        tpl = state.get_template(arc.template_id)
+        tpl_status = "" if tpl else " [模板已删除]"
+        tpl_status_color = "yellow" if not tpl else "white"
+
+        click.echo(f"[{i}] {click.style(arc.archive_id, fg='cyan')} - {arc.version_name}")
+        click.echo(f"    模板: {arc.template_name}{tpl_status}"
+                   if tpl_status else f"    模板: {arc.template_name}")
+        click.echo(f"    目标状态: {status_name}  处理人: {arc.handler or '-'}  "
+                   f"备注: {arc.remark or '-'}  来源: {arc.source_type or '-'}")
+        click.echo(f"    归档时间: {arc.archived_at[:19]}  发布时间: {arc.published_at[:19]}")
+        if arc.published_by:
+            click.echo(f"    发布人: {arc.published_by}")
+        if arc.archive_note:
+            click.echo(f"    归档备注: {arc.archive_note}")
+        click.echo()
+
+    if len(archives) > limit:
+        click.echo(f"... 还有 {len(archives) - limit} 条，使用 -n 调整显示数量")
+
+
+@archive.command("show")
+@click.argument("archive_id")
+@click.pass_context
+def archive_show(ctx, archive_id):
+    """显示档案详情"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        arc = get_archive(state, archive_id)
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    status_name = STATUS_NAMES.get(arc.target_status, arc.target_status)
+    tpl = state.get_template(arc.template_id)
+
+    click.echo(click.style(f"=== {arc.version_name} ===", bold=True, fg="cyan"))
+    click.echo(f"档案ID: {arc.archive_id}")
+    click.echo(f"模板: {arc.template_name} ({arc.template_id})")
+    if not tpl:
+        click.echo(click.style("  [当前模板已删除，档案完整保留]", fg="yellow"))
+    click.echo(f"版本名: {arc.version_name}")
+    click.echo(f"目标状态: {status_name}")
+    click.echo(f"处理人: {arc.handler or '-'}")
+    click.echo(f"备注: {arc.remark or '-'}")
+    click.echo(f"来源: {arc.source_type or '-'}")
+    click.echo(f"描述: {arc.description or '-'}")
+    click.echo(f"发布时间: {arc.published_at[:19]}")
+    click.echo(f"归档时间: {arc.archived_at[:19]}")
+    if arc.published_by:
+        click.echo(f"发布人: {arc.published_by}")
+    if arc.archive_note:
+        click.echo(f"归档备注: {arc.archive_note}")
+
+    if arc.template_snapshot:
+        click.echo()
+        click.echo("模板快照（归档时的完整副本）:")
+        snap = arc.template_snapshot
+        click.echo(f"  名称: {snap.get('name', '-')}")
+        click.echo(f"  目标状态: {STATUS_NAMES.get(snap.get('target_status', ''), snap.get('target_status', '-'))}")
+        click.echo(f"  处理人: {snap.get('handler', '-') or '-'}")
+        click.echo(f"  备注: {snap.get('remark', '-') or '-'}")
+        click.echo(f"  来源: {snap.get('source_type', '-') or '-'}")
+
+
+@archive.command("compare")
+@click.argument("archive_a_id")
+@click.argument("archive_b_id")
+@click.pass_context
+def archive_compare(ctx, archive_a_id, archive_b_id):
+    """比较两个档案的差异（目标状态、处理人、备注、来源）"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        result = compare_archives(state, archive_a_id, archive_b_id)
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    click.echo(click.style("=== 档案比较 ===", bold=True, fg="cyan"))
+    click.echo(f"档案A: {result.archive_a_name} ({result.archive_a_id})")
+    click.echo(f"档案B: {result.archive_b_name} ({result.archive_b_id})")
+    click.echo()
+
+    if result.is_same:
+        click.echo(click.style(f"{_sym('check')} 两个档案在比较字段上完全一致", fg="green"))
+    else:
+        click.echo(click.style(f"发现 {len(result.diffs)} 处差异:", fg="yellow", bold=True))
+        for diff in result.diffs:
+            click.echo(f"  {diff.field_label}:")
+            click.echo(f"    档案A: {diff.old_value or '(空)'}")
+            click.echo(f"    档案B: {diff.new_value or '(空)'}")
+            click.echo()
+
+
+@archive.command("restore")
+@click.argument("archive_id")
+@click.option("--dry-run", is_flag=True, help="仅预览恢复效果，不落盘")
+@click.option("--restored-by", default="", help="恢复操作人")
+@click.pass_context
+def archive_restore(ctx, archive_id, dry_run, restored_by):
+    """从档案恢复模板（模板已删除时自动重建，dry-run 先预览）"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        preview = preview_restore_archive(state, archive_id)
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    click.echo(click.style("=== 档案恢复预览 ===", bold=True, fg="cyan"))
+    click.echo(f"档案: {preview.version_name} ({preview.archive_id})")
+    click.echo(f"模板: {preview.template_name} ({preview.template_id})")
+    click.echo(f"操作: {preview.restore_action}")
+    click.echo()
+
+    if not preview.template_exists:
+        click.echo(click.style(f"{_sym('warn')} 模板已删除，恢复将新建模板（沿用原ID）", fg="yellow"))
+        click.echo()
+
+    if not preview.diffs and preview.template_exists:
+        click.echo(click.style(f"{_sym('check')} 当前模板与档案一致，无需恢复", fg="green"))
+        return
+
+    if preview.template_exists:
+        click.echo(click.style(f"将变更 {len(preview.diffs)} 处:", fg="yellow", bold=True))
+    else:
+        click.echo(click.style(f"新建模板配置:", fg="yellow", bold=True))
+    for diff in preview.diffs:
+        click.echo(f"  {diff.field_label}:")
+        click.echo(f"    当前: {diff.old_value or '(空)'}")
+        click.echo(f"    恢复为: {diff.new_value or '(空)'}")
+    click.echo()
+
+    if dry_run:
+        click.echo(click.style("预览模式 (dry-run)，不执行恢复", fg="cyan"))
+        return
+
+    try:
+        template = restore_archive(state, archive_id, restored_by=restored_by)
+        status_name = STATUS_NAMES.get(template.target_status, template.target_status)
+        action_desc = "新建" if not preview.template_exists else "恢复"
+        click.echo(click.style(f"{action_desc}成功: {template.name}", fg="green", bold=True))
+        click.echo(f"  模板ID: {template.template_id}")
+        click.echo(f"  目标状态: {status_name}")
+        click.echo(f"  处理人: {template.handler or '-'}")
+        click.echo(f"  备注: {template.remark or '-'}")
+        click.echo(f"  来源: {template.source_type or '-'}")
+        click.echo(f"  更新时间: {template.updated_at[:19]}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@archive.command("export")
+@click.argument("output_file")
+@click.option("--template-ids", default=None, help="逗号分隔的模板ID列表，导出这些模板的所有档案")
+@click.option("--archive-ids", default=None, help="逗号分隔的档案ID列表")
+@click.pass_context
+def archive_export(ctx, output_file, template_ids, archive_ids):
+    """导出档案到 JSON 文件"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    tid_list = None
+    aid_list = None
+    if template_ids:
+        tid_list = [x.strip() for x in template_ids.split(",") if x.strip()]
+    if archive_ids:
+        aid_list = [x.strip() for x in archive_ids.split(",") if x.strip()]
+
+    try:
+        count = export_archives(state, output_file, template_ids=tid_list, archive_ids=aid_list)
+        click.echo(click.style(f"导出成功: {output_file}", fg="green"))
+        click.echo(f"  档案数量: {count}")
+    except Exception as e:
+        click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@archive.command("import")
+@click.argument("json_file", type=click.Path(exists=True))
+@click.option("--strategy", "-s", type=click.Choice(["overwrite", "save_as", "skip", "abort"]),
+              default="skip", help="冲突处理策略", show_default=True)
+@click.option("--dry-run", is_flag=True, help="仅预检冲突，不导入")
+@click.pass_context
+def archive_import(ctx, json_file, strategy, dry_run):
+    """从 JSON 文件导入档案（含冲突预检和 4 种策略）"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        if dry_run:
+            result = precheck_archive_import(state, json_file)
+            click.echo(click.style("=== 档案导入预检结果 ===", bold=True, fg="cyan"))
+            click.echo(f"文件: {json_file}")
+            click.echo(f"待导入档案: {result['total_archives']} 个")
+            click.echo()
+
+            if result["has_conflicts"]:
+                click.echo(click.style(f"发现 {len(result['conflicts'])} 个冲突:", fg="yellow", bold=True))
+                for c in result["conflicts"]:
+                    click.echo(f"  {_sym('warn')} {c['name']}")
+                    click.echo(f"      冲突类型: {c['conflict_type']}")
+                    click.echo(f"      本地来源: {c['local_source'] or '-'}  导入来源: {c['import_source'] or '-'}")
+                    click.echo()
+                click.echo("可选策略: overwrite(覆盖) / save_as(另存) / skip(跳过) / abort(整批失败)")
+            else:
+                click.echo(click.style(f"{_sym('check')} 无冲突，可安全导入", fg="green"))
+            return
+
+        result = import_archives(state, json_file, conflict_strategy=strategy)
+
+        click.echo(click.style("=== 档案导入结果 ===", bold=True))
+        click.echo(f"文件: {json_file}")
+        click.echo(f"冲突策略: {strategy}")
+        click.echo()
+
+        if result["imported"]:
+            click.echo(click.style(f"成功导入 {len(result['imported'])} 个:", fg="green"))
+            for name in result["imported"]:
+                click.echo(f"  {_sym('check')} {name}")
+            click.echo()
+
+        if result["saved_as"]:
+            click.echo(click.style(f"另存 {len(result['saved_as'])} 个:", fg="cyan"))
+            for name in result["saved_as"]:
+                click.echo(f"  {_sym('arrow')} {name}")
+            click.echo()
+
+        if result["skipped"]:
+            click.echo(click.style(f"跳过 {len(result['skipped'])} 个:", fg="yellow"))
+            for name in result["skipped"]:
+                click.echo(f"  {_sym('warn')} {name}")
+            click.echo()
+
+        if result["errors"]:
+            click.echo(click.style(f"错误 {len(result['errors'])} 个:", fg="red"))
+            for err in result["errors"]:
+                click.echo(f"  {_sym('cross')} {err}")
+            click.echo()
+
+        click.echo(f"审计ID: {result['audit_id']}")
+
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
         sys.exit(1)
 
 

@@ -7,7 +7,9 @@ from .models import (
     DraftEntry, DraftItem, DraftExecutionResult, generate_draft_id,
     DraftTemplate, generate_template_id, AuditLogEntry, generate_audit_id,
     TemplateVersion, generate_version_id, VersionDiffItem, VersionCompareResult,
-    VersionRestorePreview, ImportConflictItem, ImportConflictResult
+    VersionRestorePreview, ImportConflictItem, ImportConflictResult,
+    TemplateArchive, generate_archive_id, ArchiveDiffItem, ArchiveCompareResult,
+    ArchiveRestorePreview
 )
 from .storage import PatrolState
 
@@ -1371,6 +1373,8 @@ def publish_version(
     state.add_version(version)
     state.save_versions()
 
+    _create_archive_from_version(state, version, published_by)
+
     audit_entry = AuditLogEntry(
         audit_id=generate_audit_id(),
         action="version_publish",
@@ -1384,6 +1388,50 @@ def publish_version(
     state.save_audit_logs()
 
     return version
+
+
+def _create_archive_from_version(
+    state: PatrolState,
+    version: TemplateVersion,
+    published_by: str = ""
+) -> TemplateArchive:
+    """从版本创建档案（内部函数）"""
+    now = datetime.now().isoformat()
+    archive_id = generate_archive_id()
+
+    archive = TemplateArchive(
+        archive_id=archive_id,
+        template_id=version.template_id,
+        template_name=version.template_name,
+        version_name=version.version_name,
+        target_status=version.target_status,
+        handler=version.handler,
+        remark=version.remark,
+        source_type=version.source_type,
+        description=version.description,
+        template_snapshot=dict(version.template_snapshot),
+        published_at=version.published_at,
+        published_by=published_by,
+        archived_at=now,
+        archive_note=""
+    )
+
+    state.add_archive(archive)
+    state.save_archives()
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="archive_create",
+        target_type="archive",
+        target_id=archive_id,
+        detail=f"创建档案 {version.version_name} (模板: {version.template_name})",
+        result="success",
+        timestamp=now
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return archive
 
 
 def list_versions(
@@ -1858,3 +1906,519 @@ def export_with_versions(
     state.save_audit_logs()
 
     return len(templates)
+
+
+ARCHIVE_COMPARE_FIELDS = [
+    ("target_status", "目标状态"),
+    ("handler", "处理人"),
+    ("remark", "备注"),
+    ("source_type", "来源"),
+]
+
+
+def list_archives(
+    state: PatrolState,
+    template_id: str = "",
+    template_name: str = ""
+) -> List[TemplateArchive]:
+    """
+    列出档案。
+
+    Args:
+        state: 状态对象
+        template_id: 按模板ID筛选（可选）
+        template_name: 按模板名称筛选（可选，模板删除后也能用）
+
+    Returns:
+        档案列表，按归档时间倒序
+    """
+    if template_name:
+        return state.list_archives_by_template_name(template_name)
+    return state.list_archives(template_id=template_id)
+
+
+def get_archive(
+    state: PatrolState,
+    archive_id: str
+) -> TemplateArchive:
+    """
+    获取档案详情。
+
+    Args:
+        state: 状态对象
+        archive_id: 档案ID
+
+    Returns:
+        TemplateArchive 对象
+    """
+    archive = state.get_archive(archive_id)
+    if not archive:
+        raise WorkflowError(f"档案不存在: {archive_id}")
+    return archive
+
+
+def compare_archives(
+    state: PatrolState,
+    archive_a_id: str,
+    archive_b_id: str
+) -> ArchiveCompareResult:
+    """
+    对比两个档案的差异。
+
+    对比字段：目标状态、处理人、备注、来源
+
+    Args:
+        state: 状态对象
+        archive_a_id: 档案A ID
+        archive_b_id: 档案B ID
+
+    Returns:
+        ArchiveCompareResult 对比结果
+    """
+    arc_a = state.get_archive(archive_a_id)
+    if not arc_a:
+        raise WorkflowError(f"档案不存在: {archive_a_id}")
+
+    arc_b = state.get_archive(archive_b_id)
+    if not arc_b:
+        raise WorkflowError(f"档案不存在: {archive_b_id}")
+
+    diffs = []
+    for field_name, field_label in ARCHIVE_COMPARE_FIELDS:
+        val_a = getattr(arc_a, field_name, "") or ""
+        val_b = getattr(arc_b, field_name, "") or ""
+        if val_a != val_b:
+            diffs.append(ArchiveDiffItem(
+                field_name=field_name,
+                field_label=field_label,
+                old_value=val_a,
+                new_value=val_b
+            ))
+
+    return ArchiveCompareResult(
+        archive_a_id=arc_a.archive_id,
+        archive_a_name=arc_a.version_name,
+        archive_b_id=arc_b.archive_id,
+        archive_b_name=arc_b.version_name,
+        diffs=diffs,
+        is_same=len(diffs) == 0
+    )
+
+
+def preview_restore_archive(
+    state: PatrolState,
+    archive_id: str
+) -> ArchiveRestorePreview:
+    """
+    预览从档案恢复模板的效果（dry-run）。
+
+    如果模板已删除，会显示"新建模板"操作。
+    如果模板存在，会显示差异对比。
+
+    Args:
+        state: 状态对象
+        archive_id: 档案ID
+
+    Returns:
+        ArchiveRestorePreview 预览结果
+    """
+    archive = state.get_archive(archive_id)
+    if not archive:
+        raise WorkflowError(f"档案不存在: {archive_id}")
+
+    template = state.get_template(archive.template_id)
+    template_exists = template is not None
+
+    current_target_status = template.target_status if template else ""
+    current_handler = template.handler if template else ""
+    current_remark = template.remark if template else ""
+    current_source_type = template.source_type if template else ""
+
+    diffs = []
+    restore_action = ""
+
+    if template_exists:
+        restore_action = "覆盖更新现有模板"
+        for field_name, field_label in ARCHIVE_COMPARE_FIELDS:
+            cur_val = getattr(template, field_name, "") if template else ""
+            arc_val = getattr(archive, field_name, "") or ""
+            if cur_val != arc_val:
+                diffs.append(ArchiveDiffItem(
+                    field_name=field_name,
+                    field_label=field_label,
+                    old_value=cur_val,
+                    new_value=arc_val
+                ))
+    else:
+        restore_action = "新建模板（从档案恢复）"
+        for field_name, field_label in ARCHIVE_COMPARE_FIELDS:
+            arc_val = getattr(archive, field_name, "") or ""
+            diffs.append(ArchiveDiffItem(
+                field_name=field_name,
+                field_label=field_label,
+                old_value="(模板不存在)",
+                new_value=arc_val
+            ))
+
+    return ArchiveRestorePreview(
+        archive_id=archive.archive_id,
+        version_name=archive.version_name,
+        template_id=archive.template_id,
+        template_name=archive.template_name,
+        template_exists=template_exists,
+        current_target_status=current_target_status,
+        current_handler=current_handler,
+        current_remark=current_remark,
+        current_source_type=current_source_type,
+        restore_target_status=archive.target_status,
+        restore_handler=archive.handler,
+        restore_remark=archive.remark,
+        restore_source_type=archive.source_type,
+        restore_action=restore_action,
+        diffs=diffs
+    )
+
+
+def restore_archive(
+    state: PatrolState,
+    archive_id: str,
+    restored_by: str = ""
+) -> DraftTemplate:
+    """
+    从档案恢复模板。
+
+    如果模板已删除，则用档案中的配置新建一个模板（保留原 template_id）。
+    如果模板存在，则用档案中的配置覆盖更新。
+
+    Args:
+        state: 状态对象
+        archive_id: 档案ID
+        restored_by: 恢复操作人
+
+    Returns:
+        恢复后的 DraftTemplate
+    """
+    archive = state.get_archive(archive_id)
+    if not archive:
+        raise WorkflowError(f"档案不存在: {archive_id}")
+
+    now = datetime.now().isoformat()
+    template = state.get_template(archive.template_id)
+
+    if template:
+        template.target_status = archive.target_status
+        template.handler = archive.handler
+        template.remark = archive.remark
+        template.source_type = archive.source_type
+        template.description = archive.description
+        template.updated_at = now
+        state.update_template(template)
+        action_detail = f"从档案 {archive.version_name} 恢复模板 {archive.template_name} (覆盖更新)"
+    else:
+        template = DraftTemplate(
+            template_id=archive.template_id,
+            name=archive.template_name,
+            target_status=archive.target_status,
+            handler=archive.handler,
+            remark=archive.remark,
+            source_type=archive.source_type,
+            description=archive.description,
+            created_at=now,
+            updated_at=now
+        )
+        state.add_template(template)
+        action_detail = f"从档案 {archive.version_name} 恢复模板 {archive.template_name} (新建)"
+
+    state.save_templates()
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="archive_restore",
+        target_type="template",
+        target_id=archive.template_id,
+        detail=action_detail,
+        result="success",
+        timestamp=now
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return template
+
+
+def export_archives(
+    state: PatrolState,
+    file_path: str,
+    template_ids: Optional[List[str]] = None,
+    archive_ids: Optional[List[str]] = None
+) -> int:
+    """
+    导出档案到 JSON 文件。
+
+    可以指定模板ID或档案ID，都不指定则导出全部。
+
+    Args:
+        state: 状态对象
+        file_path: 输出文件路径
+        template_ids: 指定模板ID列表（导出这些模板的所有档案）
+        archive_ids: 指定档案ID列表
+
+    Returns:
+        导出的档案数量
+    """
+    import json
+    from pathlib import Path
+
+    if archive_ids:
+        archives = []
+        for aid in archive_ids:
+            arc = state.get_archive(aid)
+            if arc:
+                archives.append(arc)
+    elif template_ids:
+        archives = []
+        for tid in template_ids:
+            arcs = state.list_archives(template_id=tid)
+            archives.extend(arcs)
+    else:
+        archives = state.list_archives()
+
+    data = {arc.archive_id: arc.to_dict() for arc in archives}
+
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="archive_export",
+        target_type="batch",
+        target_id=file_path,
+        detail=f"导出档案 {len(archives)} 个",
+        result="success",
+        timestamp=datetime.now().isoformat()
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return len(archives)
+
+
+def import_archives(
+    state: PatrolState,
+    file_path: str,
+    conflict_strategy: str = "skip"
+) -> dict:
+    """
+    从 JSON 文件导入档案。
+
+    冲突策略：
+    - overwrite: 覆盖同名同版本的档案
+    - save_as: 另存为新版本名称
+    - skip: 跳过冲突
+    - abort: 遇冲突整批失败
+
+    Args:
+        state: 状态对象
+        file_path: JSON 文件路径
+        conflict_strategy: 冲突处理策略
+
+    Returns:
+        包含导入统计的字典
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(file_path)
+    if not path.exists():
+        raise WorkflowError(f"文件不存在: {file_path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise WorkflowError(f"JSON 解析失败: {e}")
+
+    valid_strategies = ["overwrite", "save_as", "skip", "abort"]
+    if conflict_strategy not in valid_strategies:
+        raise WorkflowError(
+            f"无效的冲突策略: {conflict_strategy}，可选: {', '.join(valid_strategies)}"
+        )
+
+    if isinstance(data, dict):
+        archives_data = list(data.values())
+    elif isinstance(data, list):
+        archives_data = data
+    else:
+        raise WorkflowError("JSON 格式不正确，应为列表或对象")
+
+    precheck = _precheck_archive_import_conflicts(state, archives_data)
+
+    if conflict_strategy == "abort" and precheck["has_conflicts"]:
+        audit_entry = AuditLogEntry(
+            audit_id=generate_audit_id(),
+            action="archive_import",
+            target_type="batch",
+            target_id=file_path,
+            detail=f"导入中止: 存在 {len(precheck['conflicts'])} 个冲突",
+            result="failed",
+            timestamp=datetime.now().isoformat()
+        )
+        state.add_audit_log(audit_entry)
+        state.save_audit_logs()
+        return {
+            "imported": [],
+            "skipped": [c["name"] for c in precheck["conflicts"]],
+            "errors": [f"冲突中止: {c['name']}" for c in precheck["conflicts"]],
+            "saved_as": [],
+            "audit_id": audit_entry.audit_id
+        }
+
+    imported = []
+    skipped = []
+    saved_as = []
+    errors = []
+    now = datetime.now().isoformat()
+
+    for arc_data in archives_data:
+        version_name = arc_data.get("version_name", "").strip()
+        template_id = arc_data.get("template_id", "")
+        template_name = arc_data.get("template_name", "")
+
+        if not version_name or not template_id:
+            errors.append(f"档案数据缺少 version_name 或 template_id")
+            continue
+
+        existing = state.get_archive_by_version_name(template_id, version_name)
+
+        if existing:
+            if conflict_strategy == "skip":
+                skipped.append(f"{template_name}/{version_name} (已存在)")
+                continue
+            elif conflict_strategy == "overwrite":
+                archive = TemplateArchive.from_dict(arc_data)
+                archive.archive_id = existing.archive_id
+                archive.archived_at = now
+                state.update_archive(archive)
+                imported.append(f"{template_name}/{version_name} (覆盖)")
+                continue
+            elif conflict_strategy == "save_as":
+                new_ver_name = f"{version_name}-导入副本"
+                counter = 1
+                while state.get_archive_by_version_name(template_id, new_ver_name):
+                    new_ver_name = f"{version_name}-导入副本{counter}"
+                    counter += 1
+                archive = TemplateArchive.from_dict(arc_data)
+                archive.archive_id = generate_archive_id()
+                archive.version_name = new_ver_name
+                archive.archived_at = now
+                state.add_archive(archive)
+                imported.append(f"{template_name}/{new_ver_name} (另存)")
+                saved_as.append(f"{version_name} -> {new_ver_name}")
+                continue
+            else:
+                skipped.append(f"{template_name}/{version_name} (策略未处理)")
+                continue
+
+        archive = TemplateArchive.from_dict(arc_data)
+        if not archive.archive_id:
+            archive.archive_id = generate_archive_id()
+        if not archive.archived_at:
+            archive.archived_at = now
+        state.add_archive(archive)
+        imported.append(f"{template_name}/{version_name}")
+
+    state.save_archives()
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="archive_import",
+        target_type="batch",
+        target_id=file_path,
+        detail=f"导入档案 {len(imported)} 个, 跳过 {len(skipped)} 个, 另存 {len(saved_as)} 个, 错误 {len(errors)} 个",
+        result="success" if not errors else "partial",
+        timestamp=now
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "saved_as": saved_as,
+        "errors": errors,
+        "audit_id": audit_entry.audit_id
+    }
+
+
+def _precheck_archive_import_conflicts(
+    state: PatrolState,
+    archives_data: List[dict]
+) -> dict:
+    """预检档案导入冲突（内部函数）"""
+    conflicts = []
+
+    for arc_data in archives_data:
+        version_name = arc_data.get("version_name", "").strip()
+        template_id = arc_data.get("template_id", "")
+        template_name = arc_data.get("template_name", "")
+
+        if not version_name or not template_id:
+            continue
+
+        existing = state.get_archive_by_version_name(template_id, version_name)
+        if existing:
+            conflicts.append({
+                "name": f"{template_name}/{version_name}",
+                "template_id": template_id,
+                "version_name": version_name,
+                "local_source": existing.source_type or "",
+                "import_source": arc_data.get("source_type", ""),
+                "conflict_type": "version_conflict"
+            })
+
+    return {
+        "conflicts": conflicts,
+        "has_conflicts": len(conflicts) > 0
+    }
+
+
+def precheck_archive_import(
+    state: PatrolState,
+    file_path: str
+) -> dict:
+    """
+    预检档案导入冲突。
+
+    Args:
+        state: 状态对象
+        file_path: JSON 文件路径
+
+    Returns:
+        预检结果字典
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(file_path)
+    if not path.exists():
+        raise WorkflowError(f"文件不存在: {file_path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise WorkflowError(f"JSON 解析失败: {e}")
+
+    if isinstance(data, dict):
+        archives_data = list(data.values())
+    elif isinstance(data, list):
+        archives_data = data
+    else:
+        raise WorkflowError("JSON 格式不正确，应为列表或对象")
+
+    result = _precheck_archive_import_conflicts(state, archives_data)
+    result["total_archives"] = len(archives_data)
+    return result

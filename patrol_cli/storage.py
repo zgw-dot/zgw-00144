@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry, TemplateVersion
+from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry, TemplateVersion, TemplateArchive
 
 
 class PatrolState:
@@ -24,6 +24,7 @@ class PatrolState:
         self.templates_file = self.data_dir / "templates.json"
         self.audit_log_file = self.data_dir / "audit_log.json"
         self.versions_file = self.data_dir / "versions.json"
+        self.archives_file = self.data_dir / "archives.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
@@ -35,6 +36,7 @@ class PatrolState:
         self.templates: Dict[str, DraftTemplate] = {}
         self.audit_logs: List[AuditLogEntry] = []
         self.versions: Dict[str, TemplateVersion] = {}
+        self.archives: Dict[str, TemplateArchive] = {}
 
         self._load()
 
@@ -93,6 +95,13 @@ class PatrolState:
                 for ver_id, ver_data in versions_data.items():
                     self.versions[ver_id] = TemplateVersion.from_dict(ver_data)
 
+        if self.archives_file.exists():
+            with open(self.archives_file, "r", encoding="utf-8") as f:
+                archives_data = json.load(f)
+                self.archives = {}
+                for arc_id, arc_data in archives_data.items():
+                    self.archives[arc_id] = TemplateArchive.from_dict(arc_data)
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -119,6 +128,7 @@ class PatrolState:
         self.save_templates()
         self.save_audit_logs()
         self.save_versions()
+        self.save_archives()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -438,3 +448,47 @@ class PatrolState:
         for vid in to_delete:
             del self.versions[vid]
         return len(to_delete)
+
+    def save_archives(self):
+        archives_data = {
+            arc_id: arc.to_dict()
+            for arc_id, arc in self.archives.items()
+        }
+        with open(self.archives_file, "w", encoding="utf-8") as f:
+            json.dump(archives_data, f, ensure_ascii=False, indent=2)
+
+    def add_archive(self, archive: TemplateArchive):
+        self.archives[archive.archive_id] = archive
+
+    def get_archive(self, archive_id: str) -> Optional[TemplateArchive]:
+        return self.archives.get(archive_id)
+
+    def get_archive_by_version_name(self, template_id: str, version_name: str) -> Optional[TemplateArchive]:
+        for arc in self.archives.values():
+            if arc.template_id == template_id and arc.version_name == version_name:
+                return arc
+        return None
+
+    def update_archive(self, archive: TemplateArchive):
+        if archive.archive_id in self.archives:
+            self.archives[archive.archive_id] = archive
+
+    def delete_archive(self, archive_id: str) -> bool:
+        if archive_id in self.archives:
+            del self.archives[archive_id]
+            return True
+        return False
+
+    def list_archives(self, template_id: str = "") -> List[TemplateArchive]:
+        archives = list(self.archives.values())
+        if template_id:
+            archives = [a for a in archives if a.template_id == template_id]
+        archives.sort(key=lambda a: a.archived_at, reverse=True)
+        return archives
+
+    def list_archives_by_template_name(self, template_name: str = "") -> List[TemplateArchive]:
+        archives = list(self.archives.values())
+        if template_name:
+            archives = [a for a in archives if a.template_name == template_name]
+        archives.sort(key=lambda a: a.archived_at, reverse=True)
+        return archives
