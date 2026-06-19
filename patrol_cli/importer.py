@@ -2,12 +2,13 @@
 
 import csv
 import hashlib
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Any
 
 from .config import RulesConfig
-from .models import SourceRow, generate_row_id
+from .models import SourceRow, generate_row_id, ImportLogEntry, generate_log_id
 from .storage import PatrolState
 
 
@@ -46,6 +47,8 @@ class ImportResult:
         self.new_defects = 0
         self.merged_defects = 0
         self.source_rows: List[SourceRow] = []
+        self.new_defect_details: List[Dict[str, Any]] = []
+        self.merged_defect_details: List[Dict[str, Any]] = []
 
     def summary(self) -> str:
         lines = [
@@ -55,6 +58,33 @@ class ImportResult:
             f"新增缺陷: {self.new_defects}",
             f"合并缺陷: {self.merged_defects}",
         ]
+        return "\n".join(lines)
+
+    def detailed_summary(self) -> str:
+        lines = [self.summary(), ""]
+
+        if self.new_defect_details:
+            lines.append(f"新增缺陷列表 ({len(self.new_defect_details)} 条):")
+            for d in self.new_defect_details:
+                lines.append(f"  + {d['building']} / {d['device_id']} / {d['defect_type']} "
+                             f"({d['severity']}) - {d['description'][:30]}")
+            lines.append("")
+
+        if self.merged_defect_details:
+            lines.append(f"合并缺陷列表 ({len(self.merged_defect_details)} 条):")
+            for d in self.merged_defect_details:
+                lines.append(f"  → {d['defect_id']} ({d['building']} / {d['device_id']} / {d['defect_type']}) "
+                             f"+{d['added_rows']} 条来源")
+            lines.append("")
+
+        if self.invalid_rows:
+            lines.append(f"无效行 ({len(self.invalid_rows)} 条):")
+            for item in self.invalid_rows[:10]:
+                lines.append(f"  第{item['line']}行: {'; '.join(item['errors'])}")
+            if len(self.invalid_rows) > 10:
+                lines.append(f"  ... 还有 {len(self.invalid_rows) - 10} 条")
+            lines.append("")
+
         return "\n".join(lines)
 
 

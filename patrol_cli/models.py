@@ -97,3 +97,32 @@ def generate_defect_id() -> str:
 
 def generate_row_id() -> str:
     return f"ROW-{uuid.uuid4().hex[:10].upper()}"
+
+
+def generate_log_id() -> str:
+    """生成日志 ID"""
+    return f"LOG-{uuid.uuid4().hex[:12].upper()}"
+
+
+@dataclass
+class ImportLogEntry:
+    """导入日志条目"""
+    log_id: str = ""
+    log_type: str = "import"
+    filename: str = ""
+    batch_id: str = ""
+    result: str = ""
+    error_summary: str = ""
+    timestamp: str = ""
+    total_rows: int = 0
+    valid_rows: int = 0
+    invalid_rows: int = 0
+    new_defects: int = 0
+    merged_defects: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ImportLogEntry":
+        return cls(**data)

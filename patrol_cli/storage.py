@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, SourceRow
+from .models import DefectRecord, SourceRow, ImportLogEntry
 
 
 class PatrolState:
@@ -19,11 +19,13 @@ class PatrolState:
         self.defects_file = self.data_dir / "defects.json"
         self.undo_stack_file = self.data_dir / "undo_stack.json"
         self.meta_file = self.data_dir / "meta.json"
+        self.import_log_file = self.data_dir / "import_log.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
         self.batch_id: str = ""
         self.imported_files: List[str] = []
+        self.import_logs: List[ImportLogEntry] = []
 
         self._load()
 
@@ -46,6 +48,11 @@ class PatrolState:
                 self.batch_id = meta.get("batch_id", "")
                 self.imported_files = meta.get("imported_files", [])
 
+        if self.import_log_file.exists():
+            with open(self.import_log_file, "r", encoding="utf-8") as f:
+                logs_data = json.load(f)
+                self.import_logs = [ImportLogEntry.from_dict(d) for d in logs_data]
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -65,6 +72,8 @@ class PatrolState:
         }
         with open(self.meta_file, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        self.save_import_logs()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -135,6 +144,30 @@ class PatrolState:
         for def_id, def_data in snapshot.items():
             self.defects[def_id] = DefectRecord.from_dict(def_data)
 
+    def add_import_log(self, log_entry: ImportLogEntry):
+        """添加导入日志"""
+        self.import_logs.append(log_entry)
+
+    def save_import_logs(self):
+        """单独保存导入日志"""
+        logs_data = [log.to_dict() for log in self.import_logs]
+        with open(self.import_log_file, "w", encoding="utf-8") as f:
+            json.dump(logs_data, f, ensure_ascii=False, indent=2)
+
+    def get_import_logs(self, limit: int = 0) -> List[ImportLogEntry]:
+        """获取导入日志，按时间倒序"""
+        logs = sorted(self.import_logs, key=lambda x: x.timestamp, reverse=True)
+        if limit > 0:
+            return logs[:limit]
+        return logs
+
+    def get_last_import_log(self, log_type: str = "") -> Optional[ImportLogEntry]:
+        """获取最近一次导入/预检日志"""
+        logs = self.get_import_logs()
+        if log_type:
+            logs = [l for l in logs if l.log_type == log_type]
+        return logs[0] if logs else None
+
     def stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         status_counts = {}
@@ -150,5 +183,5 @@ class PatrolState:
             "by_status": status_counts,
             "by_building": building_counts,
             "imported_files": len(self.imported_files),
-            "undo_stack_size": len(self.undo_stack)
+            "undo_stack_size": len(self.undo_stack),
         }

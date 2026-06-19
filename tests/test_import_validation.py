@@ -421,3 +421,409 @@ class TestEdgeCases:
 
         assert "第3行" in str(excinfo.value)
         assert "第4行" in str(excinfo.value)
+
+
+class TestPreviewImport:
+    """预检导入（dry-run）测试"""
+
+    def test_preview_does_not_modify_defects(self, config, state_with_data, tmp_path):
+        defects_before = dict(state_with_data.defects)
+        imported_before = list(state_with_data.imported_files)
+        undo_before = list(state_with_data.undo_stack)
+        batch_before = state_with_data.batch_id
+
+        csv_path = tmp_path / "valid_preview.csv"
+        write_csv(csv_path, [
+            "3号楼,EL-999,elevator,门机故障,critical,预检测试,2025-06-20 08:30:00,张三,1单元",
+        ])
+
+        from patrol_cli.merger import preview_import
+        result = preview_import(str(csv_path), config, state_with_data, "BATCH-PREVIEW")
+
+        assert result.valid_rows == 1
+        assert result.new_defects >= 1
+
+        assert state_with_data.defects == defects_before
+        assert state_with_data.imported_files == imported_before
+        assert state_with_data.undo_stack == undo_before
+        assert state_with_data.batch_id == batch_before
+
+    def test_preview_shows_new_and_merged_details(self, config, state_with_data, tmp_path):
+        csv_path = tmp_path / "mixed_preview.csv"
+        write_csv(csv_path, [
+            "3号楼,EL-NEW,elevator,门机故障,critical,新缺陷,2025-06-20 08:30:00,张三,1单元",
+        ])
+
+        from patrol_cli.merger import preview_import
+        result = preview_import(str(csv_path), config, state_with_data, "BATCH-PREVIEW")
+
+        assert len(result.new_defect_details) == result.new_defects
+        assert len(result.merged_defect_details) == result.merged_defects
+
+        if result.new_defect_details:
+            new_d = result.new_defect_details[0]
+            assert "defect_id" in new_d
+            assert "building" in new_d
+            assert "defect_type" in new_d
+
+    def test_preview_with_invalid_rows_does_not_fail(self, config, state_with_data, tmp_path):
+        csv_path = tmp_path / "preview_with_errors.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-OK,elevator,门机故障,critical,有效行,2025-06-20 08:30:00,张三,位置",
+            ",EL-BAD,elevator,门机故障,critical,缺楼栋,2025-06-20 08:30:00,李四,位置",
+        ])
+
+        from patrol_cli.merger import preview_import
+        result = preview_import(str(csv_path), config, state_with_data, "BATCH-PREVIEW")
+
+        assert result.total_rows == 2
+        assert result.valid_rows == 1
+        assert len(result.invalid_rows) == 1
+
+    def test_preview_empty_csv(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "empty.csv"
+        write_csv(csv_path, [])
+
+        from patrol_cli.merger import preview_import
+        result = preview_import(str(csv_path), config, clean_state, "BATCH-PREVIEW")
+
+        assert result.total_rows == 0
+        assert result.valid_rows == 0
+        assert result.new_defects == 0
+        assert result.merged_defects == 0
+
+    def test_preview_does_not_write_disk_state(self, config, temp_data_dir, tmp_path):
+        state = PatrolState(data_dir=temp_data_dir)
+        import_and_merge("examples/sample_data.csv", config, state, "BATCH-TEST-001")
+
+        defects_file = Path(temp_data_dir) / "defects.json"
+        undo_file = Path(temp_data_dir) / "undo_stack.json"
+        meta_file = Path(temp_data_dir) / "meta.json"
+
+        mtime_defects_before = defects_file.stat().st_mtime
+        mtime_undo_before = undo_file.stat().st_mtime
+        mtime_meta_before = meta_file.stat().st_mtime
+
+        with open(defects_file, "r", encoding="utf-8") as f:
+            defects_before = f.read()
+        with open(undo_file, "r", encoding="utf-8") as f:
+            undo_before = f.read()
+        with open(meta_file, "r", encoding="utf-8") as f:
+            meta_before = f.read()
+
+        csv_path = tmp_path / "preview.csv"
+        write_csv(csv_path, [
+            "5号楼,EL-PRE,elevator,按钮失灵,medium,预检不写盘,2025-06-25 10:00:00,王五,位置",
+        ])
+
+        import time
+        time.sleep(0.1)
+
+        from patrol_cli.merger import preview_import
+        preview_import(str(csv_path), config, state, "BATCH-PREVIEW")
+
+        with open(defects_file, "r", encoding="utf-8") as f:
+            defects_after = f.read()
+        with open(undo_file, "r", encoding="utf-8") as f:
+            undo_after = f.read()
+        with open(meta_file, "r", encoding="utf-8") as f:
+            meta_after = f.read()
+
+        assert defects_before == defects_after
+        assert undo_before == undo_after
+        assert meta_before == meta_after
+
+        assert defects_file.stat().st_mtime == mtime_defects_before
+        assert undo_file.stat().st_mtime == mtime_undo_before
+        assert meta_file.stat().st_mtime == mtime_meta_before
+
+
+class TestImportLogs:
+    """导入日志测试"""
+
+    def test_successful_import_creates_log(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "success.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,测试成功导入,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        logs_before = len(clean_state.import_logs)
+        import_and_merge(str(csv_path), config, clean_state, "BATCH-LOG-001")
+        logs_after = len(clean_state.import_logs)
+
+        assert logs_after == logs_before + 1
+
+        last_log = clean_state.get_last_import_log("import")
+        assert last_log is not None
+        assert last_log.filename == "success.csv"
+        assert last_log.result == "success"
+        assert last_log.log_type == "import"
+        assert last_log.batch_id == "BATCH-LOG-001"
+        assert last_log.total_rows == 1
+        assert last_log.valid_rows == 1
+        assert last_log.new_defects == 1
+        assert last_log.error_summary == ""
+
+    def test_failed_import_creates_log(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "failed.csv"
+        write_csv(csv_path, [
+            ",EL-001,elevator,门机故障,critical,缺楼栋,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        logs_before = len(clean_state.import_logs)
+
+        with pytest.raises(ValueError):
+            import_and_merge(str(csv_path), config, clean_state, "BATCH-LOG-002")
+
+        logs_after = len(clean_state.import_logs)
+        assert logs_after == logs_before + 1
+
+        last_log = clean_state.get_last_import_log("import")
+        assert last_log is not None
+        assert last_log.filename == "failed.csv"
+        assert last_log.result == "failed"
+        assert last_log.invalid_rows == 1
+        assert last_log.error_summary != ""
+
+    def test_preview_creates_log(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "preview_log.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,预检日志测试,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        from patrol_cli.merger import preview_import
+        logs_before = len(clean_state.import_logs)
+        preview_import(str(csv_path), config, clean_state, "BATCH-PREVIEW-LOG")
+        logs_after = len(clean_state.import_logs)
+
+        assert logs_after == logs_before + 1
+
+        last_log = clean_state.get_last_import_log("preview")
+        assert last_log is not None
+        assert last_log.log_type == "preview"
+        assert last_log.filename == "preview_log.csv"
+
+    def test_logs_persist_after_restart(self, config, temp_data_dir, tmp_path):
+        state = PatrolState(data_dir=temp_data_dir)
+
+        csv_path = tmp_path / "persist.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,持久化测试,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        import_and_merge(str(csv_path), config, state, "BATCH-PERSIST")
+        log_count_before = len(state.import_logs)
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        log_count_after = len(state2.import_logs)
+
+        assert log_count_after == log_count_before
+        assert state2.get_last_import_log("import") is not None
+        assert state2.get_last_import_log("import").filename == "persist.csv"
+
+    def test_get_import_logs_reverse_order(self, config, clean_state, tmp_path):
+        from patrol_cli.merger import preview_import
+
+        for i in range(3):
+            csv_path = tmp_path / f"log_{i}.csv"
+            write_csv(csv_path, [
+                f"{i+1}号楼,EL-00{i},elevator,门机故障,critical,日志顺序测试,2025-06-{15+i} 08:30:00,张三,位置",
+            ])
+            preview_import(str(csv_path), config, clean_state, f"BATCH-LOG-{i}")
+
+        logs = clean_state.get_import_logs()
+        assert len(logs) == 3
+
+        timestamps = [l.timestamp for l in logs]
+        assert timestamps == sorted(timestamps, reverse=True)
+
+    def test_get_import_logs_with_limit(self, config, clean_state, tmp_path):
+        from patrol_cli.merger import preview_import
+
+        for i in range(5):
+            csv_path = tmp_path / f"limit_{i}.csv"
+            write_csv(csv_path, [
+                f"{i+1}号楼,EL-00{i},elevator,门机故障,critical,限制测试,2025-06-{15+i} 08:30:00,张三,位置",
+            ])
+            preview_import(str(csv_path), config, clean_state, f"BATCH-LIMIT-{i}")
+
+        logs = clean_state.get_import_logs(limit=2)
+        assert len(logs) == 2
+
+
+class TestDuplicateFiles:
+    """重复文件导入测试"""
+
+    def test_duplicate_file_rejected(self, config, state_with_data, tmp_path):
+        sample_name = Path("examples/sample_data.csv").name
+
+        csv_path = tmp_path / sample_name
+        write_csv(csv_path, [
+            "9号楼,EL-DUP,elevator,门机故障,critical,重复文件测试,2025-06-30 08:30:00,张三,位置",
+        ])
+
+        with pytest.raises(ValueError) as excinfo:
+            import_and_merge(str(csv_path), config, state_with_data, "BATCH-DUP")
+
+        assert "已经导入过了" in str(excinfo.value) or "重复" in str(excinfo.value).lower()
+
+    def test_duplicate_file_no_state_change(self, config, state_with_data, tmp_path):
+        stats_before = state_with_data.stats()
+        defects_before = dict(state_with_data.defects)
+        imported_before = list(state_with_data.imported_files)
+
+        sample_name = Path("examples/sample_data.csv").name
+        csv_path = tmp_path / sample_name
+        write_csv(csv_path, [
+            "9号楼,EL-DUP,elevator,门机故障,critical,重复测试,2025-06-30 08:30:00,张三,位置",
+        ])
+
+        with pytest.raises(ValueError):
+            import_and_merge(str(csv_path), config, state_with_data, "BATCH-DUP")
+
+        stats_after = state_with_data.stats()
+        assert stats_after == stats_before
+        assert state_with_data.defects == defects_before
+        assert state_with_data.imported_files == imported_before
+
+
+class TestMixedValidInvalid:
+    """坏行夹着有效行测试"""
+
+    def test_preview_mixed_valid_invalid(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "mixed.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,有效1,2025-06-15 08:30:00,张三,位置",
+            ",EL-002,elevator,门机故障,critical,缺楼栋,2025-06-15 08:30:00,李四,位置",
+            "3号楼,EL-003,elevator,按钮失灵,medium,有效2,2025-06-16 10:00:00,王五,位置",
+            "4号楼,EL-004,bad_cat,门机故障,critical,坏类别,2025-06-17 12:00:00,赵六,位置",
+        ])
+
+        from patrol_cli.merger import preview_import
+        result = preview_import(str(csv_path), config, clean_state, "BATCH-MIXED")
+
+        assert result.total_rows == 4
+        assert result.valid_rows == 2
+        assert len(result.invalid_rows) == 2
+
+        line_numbers = [item["line"] for item in result.invalid_rows]
+        assert 3 in line_numbers
+        assert 5 in line_numbers
+
+    def test_import_mixed_valid_invalid_rollback(self, config, state_with_data, tmp_path):
+        stats_before = state_with_data.stats()
+        defects_before = dict(state_with_data.defects)
+
+        csv_path = tmp_path / "mixed_import.csv"
+        write_csv(csv_path, [
+            "5号楼,EL-OK,elevator,门机故障,critical,有效行,2025-06-20 08:30:00,张三,位置",
+            ",EL-BAD,elevator,门机故障,critical,坏行,2025-06-20 08:30:00,李四,位置",
+        ])
+
+        with pytest.raises(ValueError):
+            import_and_merge(str(csv_path), config, state_with_data, "BATCH-MIXED-IMP")
+
+        stats_after = state_with_data.stats()
+        assert stats_after == stats_before
+        assert state_with_data.defects == defects_before
+
+
+class TestPreviewThenAction:
+    """预检后退出或撤销测试"""
+
+    def test_preview_then_formal_import(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "preview_then_import.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,预检后正式导入,2025-06-15 08:30:00,张三,1单元",
+        ])
+
+        from patrol_cli.merger import preview_import
+        preview_result = preview_import(str(csv_path), config, clean_state, "BATCH-PI")
+
+        assert preview_result.new_defects == 1
+        assert len(clean_state.defects) == 0
+
+        import_result = import_and_merge(str(csv_path), config, clean_state, "BATCH-PI")
+
+        assert import_result.new_defects == 1
+        assert len(clean_state.defects) == 1
+
+    def test_preview_then_undo_does_nothing(self, config, state_with_data, tmp_path):
+        csv_path = tmp_path / "preview_no_undo.csv"
+        write_csv(csv_path, [
+            "5号楼,EL-PRE,elevator,门机故障,critical,预检无撤销,2025-06-25 08:30:00,张三,位置",
+        ])
+
+        undo_size_before = len(state_with_data.undo_stack)
+
+        from patrol_cli.merger import preview_import
+        preview_import(str(csv_path), config, state_with_data, "BATCH-PRE-UNDO")
+
+        undo_size_after = len(state_with_data.undo_stack)
+        assert undo_size_after == undo_size_before
+
+        from patrol_cli.workflow import undo_last
+        action = undo_last(state_with_data)
+        assert action is not None
+
+
+class TestPostImportConsistency:
+    """正式导入后 stats、list、export、日志前后一致测试"""
+
+    def test_stats_consistent_after_import(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "consistent.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,一致性1,2025-06-15 08:30:00,张三,位置",
+            "2号楼,EL-002,elevator,按钮失灵,medium,一致性2,2025-06-16 09:00:00,李四,位置",
+        ])
+
+        result = import_and_merge(str(csv_path), config, clean_state, "BATCH-CONSIST")
+
+        stats = clean_state.stats()
+        assert stats["total"] == result.new_defects
+        assert stats["imported_files"] == 1
+
+    def test_list_consistent_after_import(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "list_consistent.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,列表一致,2025-06-15 08:30:00,张三,位置",
+        ])
+
+        result = import_and_merge(str(csv_path), config, clean_state, "BATCH-LIST")
+
+        defects = clean_state.list_defects()
+        assert len(defects) == result.new_defects
+        assert defects[0].defect_id == result.new_defect_details[0]["defect_id"]
+
+    def test_export_consistent_after_import(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "export_consistent.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,导出一致,2025-06-15 08:30:00,张三,位置",
+            "2号楼,EL-002,elevator,按钮失灵,medium,导出一致2,2025-06-16 09:00:00,李四,位置",
+        ])
+
+        result = import_and_merge(str(csv_path), config, clean_state, "BATCH-EXPORT")
+
+        output_path = str(tmp_path / "export_out.csv")
+        from patrol_cli.exporter import export_csv
+        count = export_csv(clean_state, output_path)
+
+        assert count == result.new_defects
+
+    def test_log_consistent_after_import(self, config, clean_state, tmp_path):
+        csv_path = tmp_path / "log_consistent.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,日志一致,2025-06-15 08:30:00,张三,位置",
+        ])
+
+        result = import_and_merge(str(csv_path), config, clean_state, "BATCH-LOG-CONSIST")
+
+        last_log = clean_state.get_last_import_log("import")
+        assert last_log is not None
+        assert last_log.new_defects == result.new_defects
+        assert last_log.merged_defects == result.merged_defects
+        assert last_log.total_rows == result.total_rows
+        assert last_log.valid_rows == result.valid_rows
+        assert last_log.filename == "log_consistent.csv"
+        assert last_log.batch_id == "BATCH-LOG-CONSIST"
+        assert last_log.result == "success"

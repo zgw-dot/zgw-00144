@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import load_rules
 from .storage import PatrolState
 from .models import STATUS_NAMES
-from .merger import import_and_merge
+from .merger import import_and_merge, preview_import
 from .workflow import review_defect, undo_last, batch_review, WorkflowError
 from .exporter import export_csv, export_csv_with_sources, export_html
 
@@ -49,8 +49,9 @@ def cli(ctx, config, data_dir):
 @cli.command()
 @click.argument("csv_file", type=click.Path(exists=True))
 @click.option("--batch", "-b", default=None, help="批次号，默认自动生成")
+@click.option("--dry-run", is_flag=True, help="仅预检，不落盘")
 @click.pass_context
-def import_cmd(ctx, csv_file, batch):
+def import_cmd(ctx, csv_file, batch, dry_run):
     """导入巡检 CSV 文件并归并缺陷"""
     config = ctx.obj["config"]
     state = _get_state(ctx.obj["data_dir"])
@@ -61,21 +62,121 @@ def import_cmd(ctx, csv_file, batch):
         else:
             batch = f"BATCH-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
+    if dry_run:
+        try:
+            result = preview_import(csv_file, config, state, batch)
+            click.echo(click.style("=== 预检结果 (dry-run) ===", fg="cyan", bold=True))
+            click.echo(result.detailed_summary())
+            if result.invalid_rows:
+                click.echo(click.style(f"⚠ 存在 {len(result.invalid_rows)} 条无效行，请修正后再导入", fg="yellow"))
+            else:
+                click.echo(click.style("✓ 校验通过，可正式导入", fg="green"))
+            click.echo(f"批次号: {batch}")
+            click.echo(f"数据目录: {ctx.obj['data_dir']}")
+        except FileNotFoundError as e:
+            click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+            sys.exit(1)
+        return
+
     try:
         result = import_and_merge(csv_file, config, state, batch)
         click.echo(click.style("导入完成", fg="green", bold=True))
         click.echo(result.summary())
-        if result.invalid_rows:
-            click.echo(click.style(f"\n无效行 ({len(result.invalid_rows)}):", fg="yellow"))
-            for item in result.invalid_rows[:10]:
-                click.echo(f"  第{item['line']}行: {'; '.join(item['errors'])}")
-            if len(result.invalid_rows) > 10:
-                click.echo(f"  ... 还有 {len(result.invalid_rows) - 10} 条")
+        if result.new_defect_details or result.merged_defect_details:
+            click.echo()
+            if result.new_defect_details:
+                click.echo(f"新增缺陷: {len(result.new_defect_details)} 条")
+            if result.merged_defect_details:
+                click.echo(f"合并缺陷: {len(result.merged_defect_details)} 条")
         click.echo(f"\n批次号: {state.batch_id}")
         click.echo(f"数据目录: {ctx.obj['data_dir']}")
     except ValueError as e:
         click.echo(click.style(f"错误: {e}", fg="red"), err=True)
         sys.exit(1)
+
+
+@cli.command()
+@click.argument("csv_file", type=click.Path(exists=True))
+@click.option("--batch", "-b", default=None, help="批次号")
+@click.pass_context
+def preview(ctx, csv_file, batch):
+    """预检 CSV 文件（dry-run），不落盘"""
+    config = ctx.obj["config"]
+    state = _get_state(ctx.obj["data_dir"])
+
+    if not batch:
+        if state.batch_id:
+            batch = state.batch_id
+        else:
+            batch = f"BATCH-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    try:
+        result = preview_import(csv_file, config, state, batch)
+        click.echo(click.style("=== 预检结果 ===", fg="cyan", bold=True))
+        click.echo(result.detailed_summary())
+
+        if result.invalid_rows:
+            click.echo(click.style(f"⚠ 存在 {len(result.invalid_rows)} 条无效行，请修正后再导入", fg="yellow"))
+        elif result.valid_rows == 0:
+            click.echo(click.style("⚠ 没有有效数据行", fg="yellow"))
+        else:
+            click.echo(click.style("✓ 校验通过，可正式导入", fg="green"))
+            click.echo(f"  将新增 {result.new_defects} 条缺陷")
+            click.echo(f"  将合并 {result.merged_defects} 条来源到已有缺陷")
+
+        click.echo(f"\n批次号: {batch}")
+        click.echo(f"数据目录: {ctx.obj['data_dir']}")
+        click.echo(f"模式: 预检 (不落盘)")
+    except FileNotFoundError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@cli.command("import-log")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.option("--type", "log_type", default=None,
+              type=click.Choice(["preview", "import"]),
+              help="按类型筛选")
+@click.pass_context
+def import_log_cmd(ctx, limit, log_type):
+    """查看导入日志"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    logs = state.get_import_logs(limit=limit)
+    if log_type:
+        logs = [l for l in logs if l.log_type == log_type]
+
+    if not logs:
+        click.echo("暂无导入日志")
+        return
+
+    click.echo(click.style(f"=== 导入日志 (最近 {len(logs)} 条) ===", bold=True))
+    click.echo()
+
+    for i, log in enumerate(logs, 1):
+        type_label = "预检" if log.log_type == "preview" else "导入"
+        result_color = "green" if log.result == "success" else "red" if log.result == "failed" else "yellow"
+        result_label = {
+            "success": "成功",
+            "failed": "失败",
+            "partial": "部分有效",
+            "empty": "空文件"
+        }.get(log.result, log.result)
+
+        click.echo(f"[{i}] {click.style(type_label, fg='cyan')} "
+                   f"{click.style(result_label, fg=result_color)} "
+                   f"- {log.filename}")
+        click.echo(f"    时间: {log.timestamp[:19]}  批次: {log.batch_id or '-'}")
+        click.echo(f"    总行: {log.total_rows}  有效: {log.valid_rows}  "
+                   f"无效: {log.invalid_rows}  新增: {log.new_defects}  "
+                   f"合并: {log.merged_defects}")
+        if log.error_summary:
+            click.echo(f"    错误: {click.style(log.error_summary, fg='yellow')}")
+        click.echo()
+
+    total_all = len(state.import_logs)
+    if total_all > limit:
+        click.echo(f"... 还有 {total_all - limit} 条历史记录")
 
 
 @cli.command("list")
@@ -267,6 +368,7 @@ def stats(ctx):
 
     click.echo(f"已导入文件: {s['imported_files']} 个")
     click.echo(f"撤销栈深度: {s['undo_stack_size']}")
+    click.echo(f"导入日志: {len(state.import_logs)} 条")
     click.echo(f"数据目录: {ctx.obj['data_dir']}")
 
 

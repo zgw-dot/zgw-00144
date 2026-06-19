@@ -212,6 +212,35 @@ def export_html(
         )
     stats_html = "".join(status_cards)
 
+    last_import_html = ""
+    last_import = state.get_last_import_log("import")
+    if last_import:
+        result_label = {
+            "success": "成功",
+            "failed": "失败",
+            "partial": "部分有效",
+            "empty": "空文件"
+        }.get(last_import.result, last_import.result)
+        result_color = "#10b981" if last_import.result == "success" else "#ef4444"
+        last_import_html = f"""
+  <div class="last-import">
+    <h3>最近一次导入</h3>
+    <div class="import-info">
+      <span class="import-file">📄 {last_import.filename}</span>
+      <span class="import-result" style="color:{result_color}">{result_label}</span>
+    </div>
+    <div class="import-stats">
+      <span>批次: {last_import.batch_id or '-'}</span>
+      <span>时间: {last_import.timestamp[:19]}</span>
+      <span>总行: {last_import.total_rows}</span>
+      <span>有效: {last_import.valid_rows}</span>
+      <span>新增缺陷: {last_import.new_defects}</span>
+      <span>合并来源: {last_import.merged_defects}</span>
+    </div>
+    {f'<div class="import-error">错误: {last_import.error_summary}</div>' if last_import.error_summary else ''}
+  </div>
+        """.strip()
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -224,12 +253,21 @@ def export_html(
           background: #f5f7fa; color: #333; padding: 20px; }}
   .container {{ max-width: 1200px; margin: 0 auto; }}
   h1 {{ text-align: center; color: #1e293b; margin-bottom: 20px; font-size: 24px; }}
-  .meta {{ text-align: center; color: #64748b; margin-bottom: 30px; font-size: 14px; }}
+  .meta {{ text-align: center; color: #64748b; margin-bottom: 20px; font-size: 14px; }}
   .stats {{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }}
   .stat-card {{ flex: 1; min-width: 140px; background: #fff; padding: 16px 20px; border-radius: 8px;
                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
   .stat-label {{ font-size: 13px; color: #64748b; margin-bottom: 6px; }}
   .stat-value {{ font-size: 28px; font-weight: bold; color: #1e293b; }}
+  .last-import {{ background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 24px;
+                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+  .last-import h3 {{ font-size: 14px; color: #475569; margin-bottom: 10px; }}
+  .import-info {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }}
+  .import-file {{ font-weight: 500; color: #1e293b; }}
+  .import-result {{ font-weight: bold; }}
+  .import-stats {{ display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: #64748b; }}
+  .import-error {{ margin-top: 8px; padding: 8px 12px; background: #fef2f2;
+                   border-left: 3px solid #ef4444; color: #b91c1c; font-size: 13px; border-radius: 4px; }}
   .table-wrapper {{ background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; }}
   table {{ width: 100%; border-collapse: collapse; }}
   th, td {{ padding: 12px 14px; text-align: left; border-bottom: 1px solid #e2e8f0; }}
@@ -255,6 +293,7 @@ def export_html(
   <div class="meta">
     批次号：{state.batch_id or '-'} | 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 缺陷总数：{total}
   </div>
+  {last_import_html}
   <div class="stats">{stats_html}</div>
   <div class="table-wrapper">
     <table>
