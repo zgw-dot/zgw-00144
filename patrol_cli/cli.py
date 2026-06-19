@@ -18,20 +18,50 @@ from .models import DRAFT_STATUS_NAMES
 from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv
 
 
+SNAPSHOT_KEY_FIELDS = [
+    ("name", "模板名称"),
+    ("target_status", "目标状态"),
+    ("handler", "处理人"),
+]
+
+
+def _classify_snapshot(tpl_snap):
+    """
+    对 template_snapshot 做三档分类。
+
+    返回 (snapshot_status, missing_fields):
+        snapshot_status: "complete" | "incomplete" | "missing"
+        missing_fields:  缺失字段的中文显示名列表
+    """
+    if not tpl_snap:
+        return "missing", [label for _, label in SNAPSHOT_KEY_FIELDS]
+
+    missing = []
+    for key, label in SNAPSHOT_KEY_FIELDS:
+        if key not in tpl_snap:
+            missing.append(label)
+
+    if missing:
+        return "incomplete", missing
+    return "complete", []
+
+
 def _resolve_draft_template_info(state, draft):
     """
     统一解析草稿的模板来源信息。
 
     返回 dict:
-        has_template: bool  - 是否关联了模板
-        template_id: str    - 模板ID（可能为空字符串）
-        template_name: str  - 模板名称（优先快照，其次当前模板，再次ID）
-        template_exists: bool - 模板在当前存储中是否仍存在
-        has_snapshot: bool  - 是否保存了模板快照
-        snapshot_target_status: str - 快照中的目标状态（中文名）
+        has_template: bool           - 是否关联了模板
+        template_id: str             - 模板ID（可能为空字符串）
+        template_name: str           - 模板名称（仅取快照或ID，绝不反查当前模板）
+        template_exists: bool        - 模板在当前存储中是否仍存在
+        has_snapshot: bool           - 是否保存了模板快照（残缺也算有）
+        snapshot_status: str         - "complete"|"incomplete"|"missing"
+        missing_fields: list[str]    - 残缺/缺失字段的中文显示名
+        snapshot_target_status: str  - 快照中的目标状态（中文名）
         snapshot_handler: str
         snapshot_remark: str
-        note: str          - 补充提示（老数据、模板已删除、快照缺失等）
+        note: str                    - 补充提示
     """
     info = {
         "has_template": False,
@@ -39,6 +69,8 @@ def _resolve_draft_template_info(state, draft):
         "template_name": "",
         "template_exists": False,
         "has_snapshot": False,
+        "snapshot_status": "missing",
+        "missing_fields": [],
         "snapshot_target_status": "",
         "snapshot_handler": "",
         "snapshot_remark": "",
@@ -54,33 +86,41 @@ def _resolve_draft_template_info(state, draft):
     info["has_template"] = True
 
     snap = getattr(draft, "template_snapshot", None) or {}
-    info["has_snapshot"] = bool(snap)
-
-    if snap:
-        snap_name = snap.get("name", "")
-        snap_status = snap.get("target_status", "")
-        info["template_name"] = snap_name
-        info["snapshot_target_status"] = STATUS_NAMES.get(snap_status, snap_status)
-        info["snapshot_handler"] = snap.get("handler", "") or "-"
-        info["snapshot_remark"] = snap.get("remark", "") or "-"
+    snapshot_status, missing_fields = _classify_snapshot(snap)
+    info["snapshot_status"] = snapshot_status
+    info["missing_fields"] = missing_fields
+    info["has_snapshot"] = snapshot_status in ("complete", "incomplete")
 
     tpl = state.get_template(tpl_id) if hasattr(state, "get_template") else None
     info["template_exists"] = tpl is not None
 
-    if tpl and not info["template_name"]:
-        info["template_name"] = tpl.name
+    if info["has_snapshot"]:
+        snap_name = snap.get("name", "")
+        snap_status = snap.get("target_status", "")
+        info["template_name"] = snap_name
+        info["snapshot_target_status"] = STATUS_NAMES.get(snap_status, snap_status) if snap_status else "(缺失)"
+        info["snapshot_handler"] = snap.get("handler", "") if "handler" in snap else "(缺失)"
+        if not info["snapshot_handler"] or info["snapshot_handler"] == "":
+            info["snapshot_handler"] = "-"
+        info["snapshot_remark"] = snap.get("remark", "") if "remark" in snap else "(缺失)"
+        if info["snapshot_remark"] == "":
+            info["snapshot_remark"] = "-"
 
     if not info["template_name"]:
         info["template_name"] = tpl_id
 
-    if info["has_snapshot"]:
+    if snapshot_status == "complete":
         if not info["template_exists"]:
-            info["note"] = "模板已删除，但执行时的快照已保留"
+            info["note"] = "模板已删除，但执行时的完整快照已保留"
+    elif snapshot_status == "incomplete":
+        missing_str = ",".join(missing_fields)
+        if not info["template_exists"]:
+            info["note"] = f"残缺快照: 缺{missing_str}（模板已删除，快照部分缺失）"
         else:
-            info["note"] = ""
+            info["note"] = f"残缺快照: 缺{missing_str}（不受后续变更影响，但部分信息缺失）"
     else:
         if info["template_exists"]:
-            info["note"] = "老数据，未保存模板快照（模板后续变更可能影响溯源）"
+            info["note"] = "老数据无快照（模板后续变更可能影响溯源）"
         else:
             info["note"] = "老数据，模板已删除且无快照"
 
@@ -421,7 +461,15 @@ def review_log_cmd(ctx, limit, defect_id, handler, log_type):
                 if draft:
                     tpl_info = _resolve_draft_template_info(state, draft)
                     if tpl_info["has_template"]:
-                        draft_tpl_info = f" [模板: {tpl_info['template_name']}]"
+                        ss = tpl_info["snapshot_status"]
+                        if ss == "complete":
+                            ss_tag = f" {_sym('check')}完整"
+                        elif ss == "incomplete":
+                            missing_str = ",".join(tpl_info["missing_fields"])
+                            ss_tag = f" {_sym('warn')}残缺(缺{missing_str})"
+                        else:
+                            ss_tag = f" {_sym('cross')}无快照"
+                        draft_tpl_info = f" [模板: {tpl_info['template_name']}{ss_tag}]"
                     else:
                         draft_tpl_info = " [未使用模板]"
                 click.echo(f"    草稿: {log.draft_id} ({draft_name}){draft_tpl_info}")
@@ -696,11 +744,18 @@ def draft_create(ctx, defect_ids, csv_path, status, name, handler, remark, creat
         if draft.remark:
             click.echo(f"  备注: {draft.remark}")
         if draft.template_id:
-            tpl = state.get_template(draft.template_id)
-            tpl_name = tpl.name if tpl else draft.template_id
-            click.echo(f"  模板来源: {tpl_name} ({draft.template_id})")
-            if draft.template_snapshot:
-                click.echo(f"  模板快照: 已保存（修改模板不影响此草稿）")
+            tpl_info = _resolve_draft_template_info(state, draft)
+            click.echo(f"  模板来源: {tpl_info['template_name']} ({draft.template_id})")
+            ss = tpl_info["snapshot_status"]
+            if ss == "complete":
+                click.echo(f"  模板快照: {_sym('check')} 完整快照已保存（修改模板不影响此草稿）")
+            elif ss == "incomplete":
+                missing_str = ",".join(tpl_info["missing_fields"])
+                click.echo(click.style(
+                    f"  模板快照: {_sym('warn')} 字段残缺（缺: {missing_str}）", fg="yellow"))
+            else:
+                click.echo(click.style(
+                    f"  模板快照: {_sym('cross')} 未保存快照", fg="red"))
         click.echo(f"  创建时间: {draft.created_at[:19]}")
     except WorkflowError as e:
         click.echo(click.style(f"错误: {e}", fg="red"), err=True)
@@ -725,21 +780,40 @@ def draft_preview(ctx, draft_id):
         preview_tpl_snap = preview.get("template_snapshot", {})
         if preview_tpl_id:
             tpl = state.get_template(preview_tpl_id)
-            if preview_tpl_snap:
+            preview_ss, preview_missing = _classify_snapshot(preview_tpl_snap)
+            if preview_ss == "complete":
                 tpl_name = preview_tpl_snap.get("name", preview_tpl_id)
                 click.echo(f"模板: {tpl_name} ({preview_tpl_id})")
                 snap_status = preview_tpl_snap.get("target_status", "")
                 snap_status_name = STATUS_NAMES.get(snap_status, snap_status)
+                click.echo(f"     快照完整度: {_sym('check')} 完整快照")
                 click.echo(f"     快照目标状态: {snap_status_name}  "
                            f"处理人: {preview_tpl_snap.get('handler','-')}")
                 if not tpl:
-                    click.echo(click.style(f"     [当前模板已删除，快照已保留]", fg="yellow"))
-            elif tpl:
-                click.echo(f"模板: {tpl.name} ({preview_tpl_id})")
-                click.echo(click.style(f"     [老数据，未保存模板快照]", fg="yellow"))
+                    click.echo(click.style(f"     [当前模板已删除，完整快照已保留]", fg="yellow"))
+            elif preview_ss == "incomplete":
+                tpl_name = preview_tpl_snap.get("name", preview_tpl_id)
+                missing_str = ",".join(preview_missing)
+                click.echo(f"模板: {tpl_name} ({preview_tpl_id})")
+                click.echo(click.style(f"     快照完整度: {_sym('warn')} 字段残缺（缺: {missing_str}）", fg="yellow"))
+                if "target_status" in preview_tpl_snap:
+                    snap_status = preview_tpl_snap.get("target_status", "")
+                    click.echo(f"     快照目标状态: {STATUS_NAMES.get(snap_status, snap_status)}")
+                else:
+                    click.echo(click.style(f"     快照目标状态: (缺失)", fg="yellow"))
+                if "handler" in preview_tpl_snap:
+                    click.echo(f"     处理人: {preview_tpl_snap.get('handler','-')}")
+                else:
+                    click.echo(click.style(f"     处理人: (缺失)", fg="yellow"))
+                if not tpl:
+                    click.echo(click.style(f"     [当前模板已删除，残缺快照已保留]", fg="yellow"))
             else:
                 click.echo(f"模板: {preview_tpl_id}")
-                click.echo(click.style(f"     [老数据，模板已删除且无快照]", fg="yellow"))
+                click.echo(click.style(f"     快照完整度: {_sym('cross')} 老数据无快照", fg="red"))
+                if tpl:
+                    click.echo(click.style(f"     [模板后续变更可能影响溯源]", fg="yellow"))
+                else:
+                    click.echo(click.style(f"     [模板已删除且无快照]", fg="red"))
         else:
             click.echo("模板: 未使用模板（手动创建）")
 
@@ -808,9 +882,25 @@ def draft_execute(ctx, draft_id):
             tpl_info = _resolve_draft_template_info(state, draft)
             if tpl_info["has_template"]:
                 click.echo(f"  使用模板: {tpl_info['template_name']} ({tpl_info['template_id']})")
-                if tpl_info["has_snapshot"]:
-                    click.echo(f"  模板快照: 已保存（目标状态={tpl_info['snapshot_target_status']}, "
+                ss = tpl_info["snapshot_status"]
+                if ss == "complete":
+                    click.echo(f"  模板快照: {_sym('check')} 完整快照（目标状态={tpl_info['snapshot_target_status']}, "
                                f"处理人={tpl_info['snapshot_handler']}）")
+                elif ss == "incomplete":
+                    missing_str = ",".join(tpl_info["missing_fields"])
+                    click.echo(click.style(
+                        f"  模板快照: {_sym('warn')} 字段残缺（缺: {missing_str}）", fg="yellow"))
+                    snap = getattr(draft, "template_snapshot", None) or {}
+                    if "target_status" in snap:
+                        click.echo(f"  快照目标状态: {tpl_info['snapshot_target_status']}")
+                    else:
+                        click.echo(click.style(f"  快照目标状态: (缺失)", fg="yellow"))
+                    if "handler" in snap:
+                        click.echo(f"  快照处理人: {tpl_info['snapshot_handler']}")
+                    else:
+                        click.echo(click.style(f"  快照处理人: (缺失)", fg="yellow"))
+                else:
+                    click.echo(click.style(f"  模板快照: {_sym('cross')} 老数据无快照", fg="red"))
                 if tpl_info["note"]:
                     click.echo(click.style(f"  提示: {tpl_info['note']}", fg="yellow"))
             else:
@@ -864,11 +954,17 @@ def draft_list(ctx, status, limit):
 
         tpl_info = _resolve_draft_template_info(state, draft)
         if tpl_info["has_template"]:
-            tpl_line = f"    模板: {tpl_info['template_name']} ({tpl_info['template_id']})"
+            ss = tpl_info["snapshot_status"]
+            if ss == "complete":
+                status_tag = f" [{_sym('check')}完整快照]"
+            elif ss == "incomplete":
+                missing_str = ",".join(tpl_info["missing_fields"])
+                status_tag = f" [{_sym('warn')}字段残缺:缺{missing_str}]"
+            else:
+                status_tag = f" [{_sym('cross')}老数据无快照]"
+            tpl_line = f"    模板: {tpl_info['template_name']} ({tpl_info['template_id']}){status_tag}"
             if not tpl_info["template_exists"]:
                 tpl_line += " [模板已删除]"
-            elif not tpl_info["has_snapshot"]:
-                tpl_line += " [老数据无快照]"
             click.echo(tpl_line)
         else:
             click.echo("    模板: 未使用模板（手动创建）")
@@ -916,7 +1012,9 @@ def draft_show(ctx, draft_id):
     tpl_info = _resolve_draft_template_info(state, draft)
     if tpl_info["has_template"]:
         click.echo(f"模板: {tpl_info['template_name']} ({tpl_info['template_id']})")
-        if tpl_info["has_snapshot"]:
+        ss = tpl_info["snapshot_status"]
+        if ss == "complete":
+            click.echo(f"     快照完整度: {_sym('check')} 完整快照")
             click.echo(f"     快照保存时间点的配置已保留，不受模板后续修改影响")
             click.echo(f"     快照目标状态: {tpl_info['snapshot_target_status']}")
             click.echo(f"     快照处理人: {tpl_info['snapshot_handler']}")
@@ -925,6 +1023,20 @@ def draft_show(ctx, draft_id):
                 if len(remark_display) > 30:
                     remark_display = remark_display[:30] + "..."
                 click.echo(f"     快照备注: {remark_display}")
+        elif ss == "incomplete":
+            missing_str = ",".join(tpl_info["missing_fields"])
+            click.echo(click.style(f"     快照完整度: {_sym('warn')} 字段残缺（缺: {missing_str}）", fg="yellow"))
+            snap = getattr(draft, "template_snapshot", None) or {}
+            if "target_status" in snap:
+                click.echo(f"     快照目标状态: {tpl_info['snapshot_target_status']}")
+            else:
+                click.echo(click.style(f"     快照目标状态: (缺失)", fg="yellow"))
+            if "handler" in snap:
+                click.echo(f"     快照处理人: {tpl_info['snapshot_handler']}")
+            else:
+                click.echo(click.style(f"     快照处理人: (缺失)", fg="yellow"))
+        else:
+            click.echo(click.style(f"     快照完整度: {_sym('cross')} 老数据无快照", fg="red"))
         if not tpl_info["template_exists"]:
             click.echo(click.style(f"     [当前模板已删除]", fg="yellow"))
         if tpl_info["note"]:
@@ -1107,7 +1219,15 @@ def show(ctx, defect_id):
                 if draft:
                     tpl_info = _resolve_draft_template_info(state, draft)
                     if tpl_info["has_template"]:
-                        draft_tpl_info = f" [模板: {tpl_info['template_name']}]"
+                        ss = tpl_info["snapshot_status"]
+                        if ss == "complete":
+                            ss_tag = f" {_sym('check')}完整"
+                        elif ss == "incomplete":
+                            missing_str = ",".join(tpl_info["missing_fields"])
+                            ss_tag = f" {_sym('warn')}残缺(缺{missing_str})"
+                        else:
+                            ss_tag = f" {_sym('cross')}无快照"
+                        draft_tpl_info = f" [模板: {tpl_info['template_name']}{ss_tag}]"
                     else:
                         draft_tpl_info = " [未使用模板]"
                 click.echo(f"      草稿来源: {log.draft_id} ({draft_name}){draft_tpl_info}")
@@ -1129,7 +1249,15 @@ def show(ctx, defect_id):
                        f"- {draft.name}")
             tpl_info = _resolve_draft_template_info(state, draft)
             if tpl_info["has_template"]:
-                click.echo(f"      模板: {tpl_info['template_name']} ({tpl_info['template_id']})")
+                ss = tpl_info["snapshot_status"]
+                if ss == "complete":
+                    ss_tag = " [完整快照]"
+                elif ss == "incomplete":
+                    missing_str = ",".join(tpl_info["missing_fields"])
+                    ss_tag = f" [残缺:缺{missing_str}]"
+                else:
+                    ss_tag = " [无快照]"
+                click.echo(f"      模板: {tpl_info['template_name']} ({tpl_info['template_id']}){ss_tag}")
             else:
                 click.echo(f"      模板: 未使用模板（手动创建）")
             click.echo(f"      创建: {draft.created_at[:19]}  目标: {target_status}")

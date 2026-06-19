@@ -1,52 +1,113 @@
 """导出模块 - CSV 和 HTML 报告"""
 
 import csv
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from datetime import datetime
 
 from .models import STATUS_NAMES, DRAFT_STATUS_NAMES
 from .config import RulesConfig
 from .storage import PatrolState
 
+SNAPSHOT_KEY_FIELDS = [
+    ("name", "模板名称"),
+    ("target_status", "目标状态"),
+    ("handler", "处理人"),
+]
 
-def _resolve_template_fields(state, draft):
+
+def _classify_snapshot(tpl_snap: Dict[str, Any]) -> tuple:
+    """
+    对 template_snapshot 做三档分类。
+
+    返回 (snapshot_status, missing_fields):
+        snapshot_status: "complete" | "incomplete" | "missing"
+        missing_fields:  缺失字段的中文显示名列表
+    """
+    if not tpl_snap:
+        return "missing", [label for _, label in SNAPSHOT_KEY_FIELDS]
+
+    missing = []
+    for key, label in SNAPSHOT_KEY_FIELDS:
+        if key not in tpl_snap:
+            missing.append(label)
+
+    if missing:
+        return "incomplete", missing
+    return "complete", []
+
+
+def _resolve_template_fields(state, draft) -> Dict[str, Any]:
     """
     统一解析导出用的模板字段。
-    返回 (template_id, template_name, template_note)
+
+    返回 dict:
+        template_id: str
+        template_name: str
+        template_note: str           - 具体的溯源备注
+        snapshot_status: str         - "complete"|"incomplete"|"missing"
+        missing_fields: list[str]    - 缺失字段中文名
+        snapshot_completeness_label: str - CSV 用完整度标签
     """
     tpl_id = getattr(draft, "template_id", "") or ""
     tpl_snap = getattr(draft, "template_snapshot", None) or {}
-    has_snapshot = bool(tpl_snap)
-    tpl_name = ""
-    tpl_note = ""
 
     if not tpl_id:
-        return "", "未使用模板", "手动创建"
+        return {
+            "template_id": "",
+            "template_name": "未使用模板",
+            "template_note": "手动创建",
+            "snapshot_status": "missing",
+            "missing_fields": [],
+            "snapshot_completeness_label": "非模板草稿",
+        }
 
     current_tpl = state.get_template(tpl_id) if state and hasattr(state, "get_template") else None
     template_exists = current_tpl is not None
 
-    if has_snapshot:
+    snapshot_status, missing_fields = _classify_snapshot(tpl_snap)
+
+    tpl_name = ""
+    if snapshot_status in ("complete", "incomplete"):
         tpl_name = tpl_snap.get("name", "")
-
-    if not tpl_name and template_exists:
-        tpl_name = current_tpl.name
-
     if not tpl_name:
         tpl_name = tpl_id
 
-    if has_snapshot:
+    if snapshot_status == "complete":
+        snap_target = STATUS_NAMES.get(tpl_snap.get("target_status", ""), tpl_snap.get("target_status", ""))
+        snap_handler = tpl_snap.get("handler", "") or "-"
         if not template_exists:
-            tpl_note = "模板已删除，但快照已保留"
+            template_note = (f"完整快照: 模板={tpl_name}, 目标={snap_target}, "
+                             f"处理人={snap_handler}（模板已删除，快照已保留）")
         else:
-            tpl_note = "已保存快照（不受模板后续变更影响）"
+            template_note = (f"完整快照: 模板={tpl_name}, 目标={snap_target}, "
+                             f"处理人={snap_handler}（不受后续变更影响）")
+    elif snapshot_status == "incomplete":
+        missing_str = ",".join(missing_fields)
+        if not template_exists:
+            template_note = f"残缺快照: 缺{missing_str}（模板已删除，快照部分缺失）"
+        else:
+            template_note = f"残缺快照: 缺{missing_str}（不受后续变更影响，但部分信息缺失）"
     else:
         if template_exists:
-            tpl_note = "老数据，未保存模板快照（模板后续变更可能影响溯源）"
+            template_note = "老数据无快照（模板后续变更可能影响溯源）"
         else:
-            tpl_note = "老数据，模板已删除且无快照"
+            template_note = "老数据，模板已删除且无快照"
 
-    return tpl_id, tpl_name, tpl_note
+    if snapshot_status == "complete":
+        snapshot_completeness_label = "完整快照"
+    elif snapshot_status == "incomplete":
+        snapshot_completeness_label = f"字段残缺(缺:{','.join(missing_fields)})"
+    else:
+        snapshot_completeness_label = "老数据无快照"
+
+    return {
+        "template_id": tpl_id,
+        "template_name": tpl_name,
+        "template_note": template_note,
+        "snapshot_status": snapshot_status,
+        "missing_fields": missing_fields,
+        "snapshot_completeness_label": snapshot_completeness_label,
+    }
 
 
 def export_csv(
@@ -483,7 +544,7 @@ def export_draft_csv(
     fieldnames = [
         "草稿ID", "草稿名称", "目标状态", "处理人", "备注",
         "创建时间", "执行时间", "撤销时间",
-        "模板ID", "模板名称", "模板溯源备注",
+        "模板ID", "模板名称", "快照完整度", "模板溯源备注",
         "缺陷ID", "楼栋", "设备编号", "设备类别", "缺陷类型",
         "严重等级", "快照状态", "当前状态", "描述"
     ]
@@ -495,7 +556,7 @@ def export_draft_csv(
         target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
         undo_time = draft.execution.undo_at[:19] if draft.execution.undo_at else ""
 
-        tpl_id, tpl_name, tpl_note = _resolve_template_fields(state, draft)
+        tpl_info = _resolve_template_fields(state, draft)
 
         for item in draft.items:
             snapshot = item.defect_snapshot
@@ -515,9 +576,10 @@ def export_draft_csv(
                 "创建时间": draft.created_at[:19],
                 "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
                 "撤销时间": undo_time,
-                "模板ID": tpl_id,
-                "模板名称": tpl_name,
-                "模板溯源备注": tpl_note,
+                "模板ID": tpl_info["template_id"],
+                "模板名称": tpl_info["template_name"],
+                "快照完整度": tpl_info["snapshot_completeness_label"],
+                "模板溯源备注": tpl_info["template_note"],
                 "缺陷ID": item.defect_id,
                 "楼栋": snapshot.get("building", ""),
                 "设备编号": snapshot.get("device_id", ""),
@@ -547,7 +609,7 @@ def export_draft_list_csv(
         "草稿ID", "草稿名称", "状态", "来源类型", "来源引用",
         "目标状态", "处理人", "备注", "创建人", "创建时间",
         "条目数", "执行时间", "撤销时间", "成功条数",
-        "模板ID", "模板名称", "模板溯源备注"
+        "模板ID", "模板名称", "快照完整度", "模板溯源备注"
     ]
 
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
@@ -558,7 +620,7 @@ def export_draft_list_csv(
             status_name = DRAFT_STATUS_NAMES.get(draft.status, draft.status)
             target_status_name = STATUS_NAMES.get(draft.target_status, draft.target_status)
 
-            tpl_id, tpl_name, tpl_note = _resolve_template_fields(state, draft)
+            tpl_info = _resolve_template_fields(state, draft)
 
             writer.writerow({
                 "草稿ID": draft.draft_id,
@@ -575,9 +637,10 @@ def export_draft_list_csv(
                 "执行时间": draft.execution.executed_at[:19] if draft.execution.executed_at else "",
                 "撤销时间": draft.execution.undo_at[:19] if draft.execution.undo_at else "",
                 "成功条数": draft.execution.success_count if draft.execution.success_count else 0,
-                "模板ID": tpl_id,
-                "模板名称": tpl_name,
-                "模板溯源备注": tpl_note
+                "模板ID": tpl_info["template_id"],
+                "模板名称": tpl_info["template_name"],
+                "快照完整度": tpl_info["snapshot_completeness_label"],
+                "模板溯源备注": tpl_info["template_note"]
             })
 
     return len(drafts)

@@ -14,24 +14,24 @@ from patrol_cli.workflow import (
     create_draft, create_draft_from_template,
     execute_draft, WorkflowError
 )
-from patrol_cli.exporter import export_draft_csv, export_draft_list_csv
-from patrol_cli.cli import _resolve_draft_template_info
+from patrol_cli.exporter import (
+    export_draft_csv, export_draft_list_csv,
+    _resolve_template_fields, _classify_snapshot
+)
+from patrol_cli.cli import _resolve_draft_template_info, _classify_snapshot as cli_classify_snapshot
 
 
 def setup_test_dir():
-    """创建独立测试目录"""
     test_dir = tempfile.mkdtemp(prefix="patrol_test_")
     return test_dir
 
 
 def teardown_test_dir(test_dir):
-    """清理测试目录"""
     if os.path.exists(test_dir):
         shutil.rmtree(test_dir)
 
 
 def create_sample_defect(state, defect_id, **kwargs):
-    """创建一个测试用缺陷"""
     from patrol_cli.models import DefectRecord, SourceRow
     from datetime import datetime
 
@@ -59,7 +59,7 @@ def create_sample_defect(state, defect_id, **kwargs):
 
 
 def test_1_template_draft_execute():
-    """测试1: 模板建草稿并执行，执行回显要包含模板信息"""
+    """测试1: 模板建草稿并执行，执行回显要包含模板信息，快照完整度=complete"""
     print("\n" + "=" * 60)
     print("测试1: 模板建草稿并执行")
     print("=" * 60)
@@ -90,23 +90,30 @@ def test_1_template_draft_execute():
             name="草稿-派单测试"
         )
         print(f"  从模板创建草稿: {draft.name} ({draft.draft_id})")
-        assert draft.template_id == template.template_id, "草稿应关联模板ID"
-        assert draft.template_snapshot, "草稿应保存模板快照"
-        assert draft.template_snapshot["name"] == "派单模板-A", "快照名称应正确"
-        print(f"  模板ID已关联: {draft.template_id}")
-        print(f"  模板快照已保存: 是 (name={draft.template_snapshot['name']})")
+        assert draft.template_id == template.template_id
+        assert draft.template_snapshot
+        assert draft.template_snapshot["name"] == "派单模板-A"
 
         result = execute_draft(state, draft.draft_id)
-        print(f"  执行结果: success_count={result.success_count}")
-        assert result.success_count == 2, "应成功执行2条"
+        assert result.success_count == 2
 
         tpl_info = _resolve_draft_template_info(state, draft)
         print(f"  模板信息解析: has_template={tpl_info['has_template']}, "
-              f"name={tpl_info['template_name']}, has_snapshot={tpl_info['has_snapshot']}")
+              f"name={tpl_info['template_name']}, snapshot_status={tpl_info['snapshot_status']}")
         assert tpl_info["has_template"] is True
         assert tpl_info["template_name"] == "派单模板-A"
         assert tpl_info["has_snapshot"] is True
         assert tpl_info["template_exists"] is True
+        assert tpl_info["snapshot_status"] == "complete"
+        assert tpl_info["missing_fields"] == []
+        assert tpl_info["snapshot_target_status"] == "已派单"
+        assert tpl_info["snapshot_handler"] == "张工"
+
+        tpl_export = _resolve_template_fields(state, draft)
+        assert tpl_export["snapshot_status"] == "complete"
+        assert tpl_export["snapshot_completeness_label"] == "完整快照"
+        assert "完整快照" in tpl_export["template_note"]
+        assert "不受后续变更影响" in tpl_export["template_note"]
 
         print("  [OK] 测试1通过")
         return test_dir, state
@@ -115,7 +122,7 @@ def test_1_template_draft_execute():
 
 
 def test_2_modify_template_and_review_old(test_dir, state):
-    """测试2: 修改模板后回看旧记录，旧草稿应仍显示原始模板快照"""
+    """测试2: 修改模板后回看旧记录，旧草稿应仍显示原始模板快照（不反查新模板）"""
     print("\n" + "=" * 60)
     print("测试2: 修改模板后回看旧记录")
     print("=" * 60)
@@ -137,10 +144,12 @@ def test_2_modify_template_and_review_old(test_dir, state):
         tpl_info = _resolve_draft_template_info(state, old_draft)
         print(f"  旧草稿解析出的模板名: {tpl_info['template_name']}")
         assert tpl_info["template_name"] == "派单模板-A", "旧草稿应显示快照中的原始名称，而不是新名称"
-        assert tpl_info["template_exists"] is True, "模板仍存在"
-        print(f"  快照目标状态: {tpl_info['snapshot_target_status']}")
-        print(f"  快照处理人: {tpl_info['snapshot_handler']}")
+        assert tpl_info["template_exists"] is True
+        assert tpl_info["snapshot_status"] == "complete"
         assert tpl_info["snapshot_handler"] == "张工", "旧草稿处理人快照应为张工，不是李工"
+
+        tpl_export = _resolve_template_fields(state, old_draft)
+        assert tpl_export["template_name"] == "派单模板-A"
 
         print("  [OK] 测试2通过")
     finally:
@@ -156,19 +165,19 @@ def test_3_restart_and_query(test_dir):
     try:
         state2 = PatrolState(data_dir=test_dir)
         drafts = state2.list_drafts()
-        assert len(drafts) == 1, "重启后应仍有1条草稿"
+        assert len(drafts) == 1
 
         draft = drafts[0]
         tpl_info = _resolve_draft_template_info(state2, draft)
         print(f"  重启后解析模板: name={tpl_info['template_name']}, "
-              f"id={tpl_info['template_id']}, has_snapshot={tpl_info['has_snapshot']}")
+              f"snapshot_status={tpl_info['snapshot_status']}")
         assert tpl_info["template_name"] == "派单模板-A"
         assert tpl_info["has_snapshot"] is True
+        assert tpl_info["snapshot_status"] == "complete"
 
         templates = state2.list_templates()
         assert len(templates) == 1
         assert templates[0].name == "派单模板-A-已改名"
-        print(f"  当前模板名: {templates[0].name} (不受旧草稿影响)")
 
         print("  [OK] 测试3通过")
         return state2
@@ -199,17 +208,25 @@ def test_4_export_consistency(test_dir, state):
             reader = csv.DictReader(f)
             rows = list(reader)
             print(f"  CSV 列名: {reader.fieldnames}")
-            assert "模板溯源备注" in reader.fieldnames, "应包含模板溯源备注列"
-            assert rows[0]["模板名称"] == "派单模板-A", "导出的模板名应为快照原始名"
+            assert "模板溯源备注" in reader.fieldnames
+            assert "快照完整度" in reader.fieldnames
+            assert rows[0]["模板名称"] == "派单模板-A"
             assert rows[0]["模板ID"] == draft.template_id
-            print(f"  单草稿导出 - 模板名: {rows[0]['模板名称']}, 备注: {rows[0]['模板溯源备注']}")
+            assert rows[0]["快照完整度"] == "完整快照"
+            assert "完整快照" in rows[0]["模板溯源备注"]
+            assert "不受后续变更影响" in rows[0]["模板溯源备注"]
+            print(f"  单草稿导出 - 模板名: {rows[0]['模板名称']}, "
+                  f"完整度: {rows[0]['快照完整度']}, 备注: {rows[0]['模板溯源备注']}")
 
         with open(list_csv_path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             assert "模板溯源备注" in reader.fieldnames
+            assert "快照完整度" in reader.fieldnames
             assert rows[0]["模板名称"] == "派单模板-A"
-            print(f"  草稿列表导出 - 模板名: {rows[0]['模板名称']}, 备注: {rows[0]['模板溯源备注']}")
+            assert rows[0]["快照完整度"] == "完整快照"
+            print(f"  草稿列表导出 - 模板名: {rows[0]['模板名称']}, "
+                  f"完整度: {rows[0]['快照完整度']}, 备注: {rows[0]['模板溯源备注']}")
 
         print("  [OK] 测试4通过")
     finally:
@@ -230,13 +247,15 @@ def test_5_delete_template_and_trace(test_dir, state):
         delete_template(state, template_id)
         print(f"  已删除模板: {template_id}")
 
-        assert state.get_template(template_id) is None, "模板应已删除"
+        assert state.get_template(template_id) is None
 
         tpl_info = _resolve_draft_template_info(state, draft)
         print(f"  删除后解析: name={tpl_info['template_name']}, "
-              f"exists={tpl_info['template_exists']}, note={tpl_info['note']}")
-        assert tpl_info["template_name"] == "派单模板-A", "仍应通过快照得到模板名"
+              f"exists={tpl_info['template_exists']}, snapshot_status={tpl_info['snapshot_status']}, "
+              f"note={tpl_info['note']}")
+        assert tpl_info["template_name"] == "派单模板-A"
         assert tpl_info["template_exists"] is False
+        assert tpl_info["snapshot_status"] == "complete"
         assert "已删除" in tpl_info["note"]
 
         csv_path = os.path.join(test_dir, "draft_after_delete.csv")
@@ -246,8 +265,11 @@ def test_5_delete_template_and_trace(test_dir, state):
             reader = csv.DictReader(f)
             rows = list(reader)
             assert rows[0]["模板名称"] == "派单模板-A"
+            assert rows[0]["快照完整度"] == "完整快照"
             assert "已删除" in rows[0]["模板溯源备注"]
-            print(f"  删除后CSV导出 - 模板名: {rows[0]['模板名称']}, 备注: {rows[0]['模板溯源备注']}")
+            assert "完整快照" in rows[0]["模板溯源备注"]
+            print(f"  删除后CSV导出 - 模板名: {rows[0]['模板名称']}, "
+                  f"完整度: {rows[0]['快照完整度']}, 备注: {rows[0]['模板溯源备注']}")
 
         print("  [OK] 测试5通过")
     finally:
@@ -277,18 +299,15 @@ def test_6_non_template_draft():
             handler="王工",
             remark="手动关闭"
         )
-        print(f"  手动创建草稿: {draft.name} ({draft.draft_id})")
-        assert draft.template_id == "", "非模板草稿 template_id 应为空"
-        assert not draft.template_snapshot, "非模板草稿不应有快照"
+        assert draft.template_id == ""
+        assert not draft.template_snapshot
 
         tpl_info = _resolve_draft_template_info(state, draft)
-        print(f"  模板信息解析: has_template={tpl_info['has_template']}, "
-              f"name='{tpl_info['template_name']}'")
         assert tpl_info["has_template"] is False
         assert tpl_info["template_id"] == ""
+        assert tpl_info["snapshot_status"] == "missing"
 
         result = execute_draft(state, draft.draft_id)
-        print(f"  执行结果: success_count={result.success_count}")
         assert result.success_count == 2
 
         tpl_info_after = _resolve_draft_template_info(state, draft)
@@ -300,10 +319,10 @@ def test_6_non_template_draft():
         with open(csv_path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
-            print(f"  CSV: 模板名='{rows[0]['模板名称']}', 模板溯源备注='{rows[0]['模板溯源备注']}'")
             assert rows[0]["模板名称"] == "未使用模板"
             assert rows[0]["模板ID"] == ""
             assert rows[0]["模板溯源备注"] == "手动创建"
+            assert rows[0]["快照完整度"] == "非模板草稿"
 
         list_csv = os.path.join(test_dir2, "non_template_list.csv")
         export_draft_list_csv(state, list_csv)
@@ -312,6 +331,7 @@ def test_6_non_template_draft():
             rows = list(reader)
             assert rows[0]["模板名称"] == "未使用模板"
             assert rows[0]["模板溯源备注"] == "手动创建"
+            assert rows[0]["快照完整度"] == "非模板草稿"
 
         print("  [OK] 测试6通过")
     finally:
@@ -354,33 +374,393 @@ def test_7_old_data_missing_snapshot():
 
         tpl_info = _resolve_draft_template_info(state, draft)
         print(f"  解析结果: name={tpl_info['template_name']}, "
-              f"has_snapshot={tpl_info['has_snapshot']}, note={tpl_info['note']}")
-        assert tpl_info["template_name"] == "老版本模板"
+              f"snapshot_status={tpl_info['snapshot_status']}, note={tpl_info['note']}")
+        assert tpl_info["snapshot_status"] == "missing"
         assert tpl_info["has_snapshot"] is False
         assert "老数据" in tpl_info["note"]
+        assert tpl_info["template_name"] == template.template_id, "无快照时应显示模板ID而非当前模板名"
+
+        tpl_export = _resolve_template_fields(state, draft)
+        assert tpl_export["snapshot_status"] == "missing"
+        assert tpl_export["snapshot_completeness_label"] == "老数据无快照"
+        assert "老数据" in tpl_export["template_note"]
 
         delete_template(state, template.template_id)
         state2 = PatrolState(data_dir=test_dir3)
         draft_reloaded = state2.get_draft(draft.draft_id)
         tpl_info2 = _resolve_draft_template_info(state2, draft_reloaded)
         print(f"  删除模板+重启后: name={tpl_info2['template_name']}, note={tpl_info2['note']}")
-        assert tpl_info2["template_name"] == template.template_id
         assert "老数据，模板已删除且无快照" in tpl_info2["note"]
+        assert tpl_info2["snapshot_status"] == "missing"
 
+        execute_draft(state2, draft.draft_id)
         csv_path = os.path.join(test_dir3, "old_data.csv")
         export_draft_csv(state2, draft.draft_id, csv_path)
         import csv
-        execute_draft(state2, draft.draft_id)
-        export_draft_csv(state2, draft.draft_id, csv_path)
         with open(csv_path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
-            print(f"  老数据CSV: name='{rows[0]['模板名称']}', note='{rows[0]['模板溯源备注']}'")
+            print(f"  老数据CSV: name='{rows[0]['模板名称']}', "
+                  f"完整度='{rows[0]['快照完整度']}', note='{rows[0]['模板溯源备注']}'")
             assert "老数据" in rows[0]["模板溯源备注"]
+            assert rows[0]["快照完整度"] == "老数据无快照"
 
         print("  [OK] 测试7通过")
     finally:
         teardown_test_dir(test_dir3)
+
+
+def test_8_incomplete_snapshot_detail_list_export():
+    """测试8: 残缺快照——snapshot 存在但缺关键字段，详情/列表/导出都要提示"""
+    print("\n" + "=" * 60)
+    print("测试8: 残缺快照详情/列表/导出")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-008"
+
+        defect1 = create_sample_defect(state, "DEF-INCOMPLETE-001")
+
+        template = create_template(
+            state,
+            name="残缺测试模板",
+            target_status="dispatched",
+            handler="钱工",
+            remark="备注内容"
+        )
+
+        draft = create_draft_from_template(
+            state,
+            template_id=template.template_id,
+            source="DEF-INCOMPLETE-001",
+            source_type="ids",
+            name="草稿-残缺快照模拟"
+        )
+
+        draft.template_snapshot = {"name": "残缺测试模板"}
+        state.update_draft(draft)
+        state.save_drafts()
+
+        print(f"  模拟残缺快照: 只保留 name，缺 target_status 和 handler")
+
+        tpl_info = _resolve_draft_template_info(state, draft)
+        print(f"  解析: snapshot_status={tpl_info['snapshot_status']}, "
+              f"missing_fields={tpl_info['missing_fields']}, note={tpl_info['note']}")
+        assert tpl_info["snapshot_status"] == "incomplete"
+        assert "目标状态" in tpl_info["missing_fields"]
+        assert "处理人" in tpl_info["missing_fields"]
+        assert tpl_info["has_snapshot"] is True
+        assert tpl_info["template_name"] == "残缺测试模板"
+        assert "残缺快照" in tpl_info["note"]
+        assert "缺目标状态,处理人" in tpl_info["note"]
+        assert tpl_info["snapshot_target_status"] == "(缺失)"
+        assert tpl_info["snapshot_handler"] == "(缺失)"
+
+        tpl_export = _resolve_template_fields(state, draft)
+        assert tpl_export["snapshot_status"] == "incomplete"
+        assert "缺:目标状态,处理人" in tpl_export["snapshot_completeness_label"]
+        assert "残缺快照" in tpl_export["template_note"]
+        assert "缺目标状态,处理人" in tpl_export["template_note"]
+
+        execute_draft(state, draft.draft_id)
+
+        csv_path = os.path.join(test_dir, "incomplete_draft.csv")
+        export_draft_csv(state, draft.draft_id, csv_path)
+        import csv
+        with open(csv_path, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            print(f"  残缺CSV: 完整度='{rows[0]['快照完整度']}', 备注='{rows[0]['模板溯源备注']}'")
+            assert "字段残缺" in rows[0]["快照完整度"]
+            assert "缺:目标状态" in rows[0]["快照完整度"]
+            assert "残缺快照" in rows[0]["模板溯源备注"]
+
+        list_csv_path = os.path.join(test_dir, "incomplete_list.csv")
+        export_draft_list_csv(state, list_csv_path)
+        with open(list_csv_path, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            assert "字段残缺" in rows[0]["快照完整度"]
+            assert "残缺快照" in rows[0]["模板溯源备注"]
+
+        print("  [OK] 测试8通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_9_incomplete_snapshot_with_deleted_template():
+    """测试9: 残缺快照+模板已删除"""
+    print("\n" + "=" * 60)
+    print("测试9: 残缺快照+模板已删除")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-009"
+
+        defect1 = create_sample_defect(state, "DEF-DEL-INCOMPLETE-001")
+
+        template = create_template(
+            state,
+            name="将被删除的残缺模板",
+            target_status="false_positive",
+            handler="孙工"
+        )
+
+        draft = create_draft_from_template(
+            state,
+            template_id=template.template_id,
+            source="DEF-DEL-INCOMPLETE-001",
+            source_type="ids"
+        )
+
+        draft.template_snapshot = {"name": "将被删除的残缺模板"}
+        state.update_draft(draft)
+        state.save_drafts()
+
+        delete_template(state, template.template_id)
+
+        tpl_info = _resolve_draft_template_info(state, draft)
+        print(f"  解析: snapshot_status={tpl_info['snapshot_status']}, "
+              f"exists={tpl_info['template_exists']}, note={tpl_info['note']}")
+        assert tpl_info["snapshot_status"] == "incomplete"
+        assert tpl_info["template_exists"] is False
+        assert "残缺快照" in tpl_info["note"]
+        assert "模板已删除" in tpl_info["note"]
+
+        tpl_export = _resolve_template_fields(state, draft)
+        assert "残缺快照" in tpl_export["template_note"]
+        assert "模板已删除" in tpl_export["template_note"]
+
+        execute_draft(state, draft.draft_id)
+        csv_path = os.path.join(test_dir, "del_incomplete.csv")
+        export_draft_csv(state, draft.draft_id, csv_path)
+        import csv
+        with open(csv_path, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            assert "残缺快照" in rows[0]["模板溯源备注"]
+            assert "模板已删除" in rows[0]["模板溯源备注"]
+
+        print("  [OK] 测试9通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_10_template_delete_then_history_review():
+    """测试10: 模板删除后历史回看——旧草稿仍按快照展示，不拿新模板反推"""
+    print("\n" + "=" * 60)
+    print("测试10: 模板删除后历史回看")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-010"
+
+        defect1 = create_sample_defect(state, "DEF-DEL-HIST-001")
+
+        template = create_template(
+            state,
+            name="历史模板-B",
+            target_status="dispatched",
+            handler="周工",
+            remark="历史备注"
+        )
+
+        draft = create_draft_from_template(
+            state,
+            template_id=template.template_id,
+            source="DEF-DEL-HIST-001",
+            source_type="ids"
+        )
+        execute_draft(state, draft.draft_id)
+
+        tpl_info_before = _resolve_draft_template_info(state, draft)
+        name_before = tpl_info_before["template_name"]
+        handler_before = tpl_info_before["snapshot_handler"]
+
+        delete_template(state, template.template_id)
+
+        new_template = create_template(
+            state,
+            name="新模板-C",
+            target_status="dispatched",
+            handler="吴工",
+            remark="新备注"
+        )
+
+        tpl_info_after = _resolve_draft_template_info(state, draft)
+        print(f"  删除后解析: name={tpl_info_after['template_name']}, "
+              f"handler={tpl_info_after['snapshot_handler']}, "
+              f"exists={tpl_info_after['template_exists']}")
+        assert tpl_info_after["template_name"] == name_before, "仍应显示快照中的原始名称"
+        assert tpl_info_after["snapshot_handler"] == handler_before, "仍应显示快照中的原始处理人"
+        assert tpl_info_after["snapshot_status"] == "complete"
+        assert tpl_info_after["template_exists"] is False
+
+        print("  [OK] 测试10通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_11_restart_consistency_for_all_tiers():
+    """测试11: 重启后所有三档快照状态查询一致"""
+    print("\n" + "=" * 60)
+    print("测试11: 重启后三档快照查询一致性")
+    print("=" * 60)
+
+    test_dir = setup_test_dir()
+    try:
+        state = PatrolState(data_dir=test_dir)
+        state.batch_id = "BATCH-TEST-011"
+
+        defect1 = create_sample_defect(state, "DEF-RESTART-001")
+        defect2 = create_sample_defect(state, "DEF-RESTART-002", building="2号楼")
+        defect3 = create_sample_defect(state, "DEF-RESTART-003", building="3号楼")
+
+        tpl_complete = create_template(
+            state, name="完整模板", target_status="dispatched", handler="甲"
+        )
+        tpl_incomplete = create_template(
+            state, name="残缺模板", target_status="closed", handler="乙"
+        )
+        tpl_missing = create_template(
+            state, name="缺失模板", target_status="false_positive", handler="丙"
+        )
+
+        draft_complete = create_draft_from_template(
+            state, template_id=tpl_complete.template_id,
+            source="DEF-RESTART-001", source_type="ids"
+        )
+        execute_draft(state, draft_complete.draft_id)
+
+        draft_incomplete = create_draft_from_template(
+            state, template_id=tpl_incomplete.template_id,
+            source="DEF-RESTART-002", source_type="ids"
+        )
+        draft_incomplete.template_snapshot = {"name": "残缺模板"}
+        state.update_draft(draft_incomplete)
+        state.save_drafts()
+        execute_draft(state, draft_incomplete.draft_id)
+
+        draft_missing = create_draft(
+            state, source="DEF-RESTART-003", source_type="ids",
+            target_status="false_positive", name="老数据草稿"
+        )
+        draft_missing.template_id = tpl_missing.template_id
+        draft_missing.template_snapshot = {}
+        state.update_draft(draft_missing)
+        state.save_drafts()
+        execute_draft(state, draft_missing.draft_id)
+
+        info_before_complete = _resolve_draft_template_info(state, draft_complete)
+        info_before_incomplete = _resolve_draft_template_info(state, draft_incomplete)
+        info_before_missing = _resolve_draft_template_info(state, draft_missing)
+
+        export_before_complete = _resolve_template_fields(state, draft_complete)
+        export_before_incomplete = _resolve_template_fields(state, draft_incomplete)
+        export_before_missing = _resolve_template_fields(state, draft_missing)
+
+        csv_complete_path = os.path.join(test_dir, "restart_complete.csv")
+        csv_incomplete_path = os.path.join(test_dir, "restart_incomplete.csv")
+        csv_missing_path = os.path.join(test_dir, "restart_missing.csv")
+        export_draft_csv(state, draft_complete.draft_id, csv_complete_path)
+        export_draft_csv(state, draft_incomplete.draft_id, csv_incomplete_path)
+        export_draft_csv(state, draft_missing.draft_id, csv_missing_path)
+
+        state2 = PatrolState(data_dir=test_dir)
+
+        draft_complete_r = state2.get_draft(draft_complete.draft_id)
+        draft_incomplete_r = state2.get_draft(draft_incomplete.draft_id)
+        draft_missing_r = state2.get_draft(draft_missing.draft_id)
+
+        info_after_complete = _resolve_draft_template_info(state2, draft_complete_r)
+        info_after_incomplete = _resolve_draft_template_info(state2, draft_incomplete_r)
+        info_after_missing = _resolve_draft_template_info(state2, draft_missing_r)
+
+        export_after_complete = _resolve_template_fields(state2, draft_complete_r)
+        export_after_incomplete = _resolve_template_fields(state2, draft_incomplete_r)
+        export_after_missing = _resolve_template_fields(state2, draft_missing_r)
+
+        assert info_after_complete["snapshot_status"] == "complete"
+        assert info_after_complete["template_name"] == info_before_complete["template_name"]
+        assert info_after_complete["snapshot_handler"] == info_before_complete["snapshot_handler"]
+
+        assert info_after_incomplete["snapshot_status"] == "incomplete"
+        assert info_after_incomplete["missing_fields"] == info_before_incomplete["missing_fields"]
+        assert info_after_incomplete["template_name"] == info_before_incomplete["template_name"]
+
+        assert info_after_missing["snapshot_status"] == "missing"
+        assert info_after_missing["note"] == info_before_missing["note"]
+
+        assert export_after_complete["template_note"] == export_before_complete["template_note"]
+        assert export_after_incomplete["template_note"] == export_before_incomplete["template_note"]
+        assert export_after_missing["template_note"] == export_before_missing["template_note"]
+
+        csv_complete_path2 = os.path.join(test_dir, "restart_complete_v2.csv")
+        csv_incomplete_path2 = os.path.join(test_dir, "restart_incomplete_v2.csv")
+        csv_missing_path2 = os.path.join(test_dir, "restart_missing_v2.csv")
+        export_draft_csv(state2, draft_complete_r.draft_id, csv_complete_path2)
+        export_draft_csv(state2, draft_incomplete_r.draft_id, csv_incomplete_path2)
+        export_draft_csv(state2, draft_missing_r.draft_id, csv_missing_path2)
+
+        import csv as csv_mod
+        for path1, path2 in [
+            (csv_complete_path, csv_complete_path2),
+            (csv_incomplete_path, csv_incomplete_path2),
+            (csv_missing_path, csv_missing_path2),
+        ]:
+            with open(path1, "r", encoding="utf-8-sig") as f1, open(path2, "r", encoding="utf-8-sig") as f2:
+                rows1 = list(csv_mod.DictReader(f1))
+                rows2 = list(csv_mod.DictReader(f2))
+                assert rows1[0]["模板名称"] == rows2[0]["模板名称"]
+                assert rows1[0]["快照完整度"] == rows2[0]["快照完整度"]
+                assert rows1[0]["模板溯源备注"] == rows2[0]["模板溯源备注"]
+
+        print("  [OK] 测试11通过")
+    finally:
+        teardown_test_dir(test_dir)
+
+
+def test_12_classify_snapshot_unit():
+    """测试12: _classify_snapshot 单元测试"""
+    print("\n" + "=" * 60)
+    print("测试12: _classify_snapshot 单元测试")
+    print("=" * 60)
+
+    ss, mf = _classify_snapshot({})
+    assert ss == "missing"
+    assert len(mf) == 3
+
+    ss, mf = _classify_snapshot(None)
+    assert ss == "missing"
+
+    ss, mf = _classify_snapshot({"name": "A", "target_status": "closed", "handler": "X"})
+    assert ss == "complete"
+    assert mf == []
+
+    ss, mf = _classify_snapshot({"name": "A", "target_status": "closed"})
+    assert ss == "incomplete"
+    assert "处理人" in mf
+
+    ss, mf = _classify_snapshot({"name": "A"})
+    assert ss == "incomplete"
+    assert "目标状态" in mf
+    assert "处理人" in mf
+
+    ss, mf = _classify_snapshot({"target_status": "closed"})
+    assert ss == "incomplete"
+    assert "模板名称" in mf
+    assert "处理人" in mf
+
+    assert cli_classify_snapshot({}) == ("missing", ["模板名称", "目标状态", "处理人"])
+    assert cli_classify_snapshot({"name": "A", "target_status": "X", "handler": "Y"}) == ("complete", [])
+
+    print("  [OK] 测试12通过")
 
 
 if __name__ == "__main__":
@@ -399,6 +779,11 @@ if __name__ == "__main__":
         test_5_delete_template_and_trace(test_dir, state)
         test_6_non_template_draft()
         test_7_old_data_missing_snapshot()
+        test_8_incomplete_snapshot_detail_list_export()
+        test_9_incomplete_snapshot_with_deleted_template()
+        test_10_template_delete_then_history_review()
+        test_11_restart_consistency_for_all_tiers()
+        test_12_classify_snapshot_unit()
 
         print("\n" + "=" * 60)
         print("[OK] 全部端到端测试通过！")
