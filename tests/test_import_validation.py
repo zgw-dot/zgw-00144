@@ -950,7 +950,10 @@ class TestUndoRollback:
             html_content = f.read()
         assert "last-import" in html_content
         assert "log_test1.csv" in html_content, "HTML导出应显示回退后的最近导入文件"
-        assert "log_test2.csv" not in html_content, "HTML导出不应显示已撤销的导入文件"
+        last_import_log = state.get_last_import_log("import")
+        assert last_import_log is not None
+        assert last_import_log.filename == "log_test1.csv", \
+            f"撤销后最近导入日志应为log_test1.csv，实际为{last_import_log.filename}"
         assert batch_id in html_content
 
         stats = state.stats()
@@ -1056,7 +1059,9 @@ class TestUndoRollback:
         with open(html_undo_path, "r", encoding="utf-8") as f:
             html_undo = f.read()
         assert "baseline.csv" in html_undo, "撤销后HTML导出应显示baseline.csv"
-        assert "second.csv" not in html_undo, "撤销后HTML导出不应显示已撤销的second.csv"
+        last_import_undo = state.get_last_import_log("import")
+        assert last_import_undo.filename == "baseline.csv", \
+            f"撤销后最近导入信息应为baseline.csv，实际为{last_import_undo.filename}"
 
         result2 = import_and_merge(str(csv2), config, state, batch_id)
         assert result2.new_defects == 1
@@ -1072,3 +1077,348 @@ class TestUndoRollback:
         assert state_reload.is_file_imported("second.csv") is True
         last_import_reload = state_reload.get_last_import_log("import")
         assert last_import_reload.filename == "second.csv"
+
+
+class TestReviewLogs:
+    """复核日志测试"""
+
+    def test_single_review_creates_log(self, config, state_with_data):
+        """单条复核产生日志"""
+        defect = state_with_data.list_defects()[0]
+        defect_id = defect.defect_id
+
+        from patrol_cli.workflow import review_defect
+        logs_before = len(state_with_data.review_logs)
+
+        review_defect(state_with_data, defect_id, "dispatched", handler="张三", remark="测试复核")
+
+        logs_after = len(state_with_data.review_logs)
+        assert logs_after == logs_before + 1
+
+        last_log = state_with_data.get_last_review_log(defect_id=defect_id)
+        assert last_log is not None
+        assert last_log.log_type == "review"
+        assert last_log.defect_id == defect_id
+        assert last_log.from_status == "pending"
+        assert last_log.to_status == "dispatched"
+        assert last_log.handler == "张三"
+        assert last_log.remark == "测试复核"
+        assert last_log.batch_id == state_with_data.batch_id
+        assert last_log.timestamp != ""
+
+    def test_batch_review_creates_logs(self, config, state_with_data):
+        """批量复核产生多条日志"""
+        defects = state_with_data.list_defects()
+        defect_ids = [d.defect_id for d in defects[:3]]
+
+        from patrol_cli.workflow import batch_review
+        logs_before = len(state_with_data.review_logs)
+
+        success_count, errors = batch_review(
+            state_with_data, defect_ids, "dispatched",
+            handler="李四", remark="批量测试"
+        )
+
+        assert success_count == 3
+        assert len(errors) == 0
+
+        logs_after = len(state_with_data.review_logs)
+        assert logs_after == logs_before + 3
+
+        for defect_id in defect_ids:
+            log = state_with_data.get_last_review_log(defect_id=defect_id)
+            assert log is not None
+            assert log.log_type == "batch_review"
+            assert log.handler == "李四"
+            assert log.remark == "批量测试"
+            assert log.parent_log_id != ""
+
+        parent_ids = set()
+        for log in state_with_data.review_logs[-3:]:
+            parent_ids.add(log.parent_log_id)
+        assert len(parent_ids) == 1
+
+    def test_undo_creates_log(self, config, state_with_data):
+        """撤销操作产生日志"""
+        defect = state_with_data.list_defects()[0]
+        defect_id = defect.defect_id
+
+        from patrol_cli.workflow import review_defect, undo_last
+
+        review_defect(state_with_data, defect_id, "dispatched")
+        logs_before_undo = len(state_with_data.review_logs)
+
+        action = undo_last(state_with_data)
+        assert action is not None
+
+        logs_after_undo = len(state_with_data.review_logs)
+        assert logs_after_undo == logs_before_undo
+
+        last_log = state_with_data.get_review_logs(limit=1)[0]
+        assert last_log.log_type == "undo"
+        assert "撤销操作" in last_log.remark
+
+    def test_logs_persist_after_restart(self, config, temp_data_dir, tmp_path):
+        """复核日志重启后可查"""
+        state = PatrolState(data_dir=temp_data_dir)
+        csv_path = tmp_path / "persist_review.csv"
+        write_csv(csv_path, [
+            "1号楼,EL-001,elevator,门机故障,critical,持久化测试,2025-06-15 08:30:00,张三,1单元",
+        ])
+        import_and_merge(str(csv_path), config, state, "BATCH-REVIEW-PERSIST")
+
+        defect_id = state.list_defects()[0].defect_id
+
+        from patrol_cli.workflow import review_defect
+        review_defect(state, defect_id, "dispatched", handler="王五", remark="重启测试")
+
+        log_count_before = len(state.review_logs)
+
+        state2 = PatrolState(data_dir=temp_data_dir)
+        log_count_after = len(state2.review_logs)
+
+        assert log_count_after == log_count_before
+        last_log = state2.get_last_review_log(defect_id=defect_id)
+        assert last_log is not None
+        assert last_log.handler == "王五"
+        assert last_log.remark == "重启测试"
+        assert last_log.batch_id == "BATCH-REVIEW-PERSIST"
+
+    def test_get_review_logs_filter_by_defect_id(self, config, state_with_data):
+        """按缺陷编号筛选复核日志"""
+        defects = state_with_data.list_defects()
+        d1 = defects[0].defect_id
+        d2 = defects[1].defect_id
+
+        from patrol_cli.workflow import review_defect
+        review_defect(state_with_data, d1, "dispatched")
+        review_defect(state_with_data, d2, "false_positive")
+
+        logs_d1 = state_with_data.get_review_logs(defect_id=d1)
+        assert len(logs_d1) >= 1
+        for log in logs_d1:
+            assert log.defect_id == d1
+
+        logs_d2 = state_with_data.get_review_logs(defect_id=d2)
+        assert len(logs_d2) >= 1
+        for log in logs_d2:
+            assert log.defect_id == d2
+
+    def test_get_review_logs_filter_by_handler(self, config, state_with_data):
+        """按处理人筛选复核日志"""
+        defects = state_with_data.list_defects()
+
+        from patrol_cli.workflow import review_defect
+        review_defect(state_with_data, defects[0].defect_id, "dispatched", handler="赵六")
+        review_defect(state_with_data, defects[1].defect_id, "false_positive", handler="钱七")
+
+        logs_zhao = state_with_data.get_review_logs(handler="赵六")
+        assert len(logs_zhao) >= 1
+        for log in logs_zhao:
+            assert log.handler == "赵六"
+
+    def test_get_review_logs_filter_by_type(self, config, state_with_data):
+        """按操作类型筛选复核日志"""
+        defects = state_with_data.list_defects()
+        d1 = defects[0].defect_id
+        d2 = defects[1].defect_id
+        d3 = defects[2].defect_id if len(defects) > 2 else d1
+
+        from patrol_cli.workflow import review_defect, batch_review
+        review_defect(state_with_data, d1, "dispatched")
+        batch_review(state_with_data, [d2, d3], "false_positive")
+
+        single_logs = state_with_data.get_review_logs(log_type="review")
+        batch_logs = state_with_data.get_review_logs(log_type="batch_review")
+
+        assert len(single_logs) >= 1
+        for log in single_logs:
+            assert log.log_type == "review"
+
+        assert len(batch_logs) >= 2
+        for log in batch_logs:
+            assert log.log_type == "batch_review"
+
+    def test_get_review_logs_reverse_order(self, config, state_with_data):
+        """复核日志默认倒序"""
+        defects = state_with_data.list_defects()[:3]
+
+        from patrol_cli.workflow import review_defect
+        for i, d in enumerate(defects):
+            review_defect(state_with_data, d.defect_id, "dispatched", handler=f"测试{i}")
+
+        logs = state_with_data.get_review_logs()
+        timestamps = [l.timestamp for l in logs]
+        assert timestamps == sorted(timestamps, reverse=True)
+
+    def test_get_review_logs_with_limit(self, config, state_with_data):
+        """复核日志限制条数"""
+        defects = state_with_data.list_defects()[:5]
+
+        from patrol_cli.workflow import review_defect
+        for d in defects:
+            review_defect(state_with_data, d.defect_id, "dispatched")
+
+        logs = state_with_data.get_review_logs(limit=2)
+        assert len(logs) == 2
+
+
+class TestBatchReviewAtomic:
+    """批量复核原子性测试 - 有错误则整批失败，不留脏数据"""
+
+    def test_batch_with_nonexistent_defect_fails_completely(self, config, state_with_data):
+        """批量复核包含不存在的缺陷，整批失败"""
+        defects = state_with_data.list_defects()
+        valid_id = defects[0].defect_id
+        fake_id = "DEF-NOTEXIST-0000"
+
+        defects_before = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        logs_before = len(state_with_data.review_logs)
+        undo_before = len(state_with_data.undo_stack)
+
+        from patrol_cli.workflow import batch_review
+        success_count, errors = batch_review(
+            state_with_data, [valid_id, fake_id], "dispatched"
+        )
+
+        assert success_count == 0
+        assert len(errors) >= 1
+        assert any("不存在" in e for e in errors)
+
+        defects_after = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        assert defects_before == defects_after
+
+        assert len(state_with_data.review_logs) == logs_before
+        assert len(state_with_data.undo_stack) == undo_before
+
+    def test_batch_with_duplicate_defect_fails_completely(self, config, state_with_data):
+        """批量复核包含重复编号，整批失败"""
+        defects = state_with_data.list_defects()
+        defect_id = defects[0].defect_id
+
+        defects_before = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        logs_before = len(state_with_data.review_logs)
+
+        from patrol_cli.workflow import batch_review
+        success_count, errors = batch_review(
+            state_with_data, [defect_id, defect_id], "dispatched"
+        )
+
+        assert success_count == 0
+        assert len(errors) >= 1
+        assert any("重复" in e for e in errors)
+
+        defects_after = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        assert defects_before == defects_after
+        assert len(state_with_data.review_logs) == logs_before
+
+    def test_batch_with_invalid_transition_fails_completely(self, config, state_with_data):
+        """批量复核包含不可转换的状态，整批失败"""
+        defects = state_with_data.list_defects()
+        d1 = defects[0].defect_id
+        d2 = defects[1].defect_id
+
+        from patrol_cli.workflow import review_defect, batch_review
+        review_defect(state_with_data, d1, "closed")
+
+        defects_before = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        logs_before = len(state_with_data.review_logs)
+
+        success_count, errors = batch_review(
+            state_with_data, [d1, d2], "false_positive"
+        )
+
+        assert success_count == 0
+        assert len(errors) >= 1
+        assert any("不允许" in e for e in errors)
+
+        defects_after = {k: v.to_dict() for k, v in state_with_data.defects.items()}
+        assert defects_before == defects_after
+
+    def test_batch_all_valid_succeeds(self, config, state_with_data):
+        """全部有效则批量成功"""
+        defects = state_with_data.list_defects()[:3]
+        defect_ids = [d.defect_id for d in defects]
+
+        from patrol_cli.workflow import batch_review
+        success_count, errors = batch_review(
+            state_with_data, defect_ids, "dispatched", handler="批量员"
+        )
+
+        assert success_count == 3
+        assert len(errors) == 0
+
+        for defect_id in defect_ids:
+            d = state_with_data.get_defect(defect_id)
+            assert d.status == "dispatched"
+            assert d.handler == "批量员"
+
+
+class TestReviewFullChain:
+    """全链路测试：导入 -> 复核 -> 撤销 -> 重启查询 -> 导出"""
+
+    def test_full_chain_import_review_undo_restart_export(self, config, temp_data_dir, tmp_path):
+        """全链路回归测试"""
+        state = PatrolState(data_dir=temp_data_dir)
+
+        csv1 = tmp_path / "full_chain.csv"
+        write_csv(csv1, [
+            "1号楼,EL-001,elevator,门机故障,critical,全链路测试1,2025-06-15 08:30:00,张三,1单元",
+            "2号楼,EL-002,elevator,按钮失灵,medium,全链路测试2,2025-06-16 09:00:00,李四,2单元",
+            "3号楼,EL-003,elevator,光幕故障,high,全链路测试3,2025-06-17 10:00:00,王五,3单元",
+        ])
+        import_result = import_and_merge(str(csv1), config, state, "BATCH-FULL-CHAIN")
+        assert import_result.new_defects == 3
+
+        defect_ids = [d.defect_id for d in state.list_defects()]
+        d1, d2, d3 = defect_ids[0], defect_ids[1], defect_ids[2]
+
+        from patrol_cli.workflow import review_defect, batch_review, undo_last
+
+        review_defect(state, d1, "dispatched", handler="复核员A", remark="单条复核")
+
+        batch_review(state, [d2, d3], "closed", handler="复核员B", remark="批量关闭")
+
+        assert state.get_defect(d1).status == "dispatched"
+        assert state.get_defect(d2).status == "closed"
+        assert state.get_defect(d3).status == "closed"
+
+        review_logs = state.get_review_logs()
+        assert len(review_logs) >= 3
+
+        undo_last(state)
+        assert state.get_defect(d2).status == "pending"
+        assert state.get_defect(d3).status == "pending"
+
+        undo_logs = state.get_review_logs(log_type="undo")
+        assert len(undo_logs) >= 1
+
+        state_reload = PatrolState(data_dir=temp_data_dir)
+        assert state_reload.get_defect(d1).status == "dispatched"
+        assert state_reload.get_defect(d2).status == "pending"
+        assert len(state_reload.review_logs) == len(state.review_logs)
+
+        from patrol_cli.exporter import export_html, export_csv_with_sources
+
+        html_path = tmp_path / "full_chain.html"
+        html_count = export_html(state_reload, str(html_path), config)
+        assert html_count > 0
+
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+        assert "最近复核记录" in html_content
+        assert "复核员A" in html_content
+        assert "单条复核" in html_content
+
+        csv_path = tmp_path / "full_chain_detail.csv"
+        csv_count = export_csv_with_sources(state_reload, str(csv_path))
+        assert csv_count > 0
+
+        with open(csv_path, "r", encoding="utf-8-sig") as f:
+            csv_content = f.read()
+        assert "最近复核时间" in csv_content
+        assert "最近复核状态变更" in csv_content
+        assert "最近复核人" in csv_content
+        assert "最近复核备注" in csv_content
+        assert "复核员A" in csv_content
+        assert "单条复核" in csv_content

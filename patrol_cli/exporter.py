@@ -66,7 +66,8 @@ def export_csv_with_sources(
     fieldnames = [
         "缺陷ID", "楼栋", "设备编号", "设备类别", "缺陷类型",
         "严重等级", "状态", "描述", "首次发现", "最后发现",
-        "来源文件", "来源行号", "导入时间", "处理人", "复核备注"
+        "来源文件", "来源行号", "导入时间", "处理人", "复核备注",
+        "最近复核时间", "最近复核状态变更", "最近复核人", "最近复核备注"
     ]
 
     row_count = 0
@@ -75,6 +76,19 @@ def export_csv_with_sources(
         writer.writeheader()
 
         for d in defects:
+            last_review = state.get_last_review_log(defect_id=d.defect_id)
+            review_time = ""
+            review_status_change = ""
+            review_handler = ""
+            review_remark = ""
+            if last_review:
+                review_time = last_review.timestamp[:19] if last_review.timestamp else ""
+                from_name = STATUS_NAMES.get(last_review.from_status, last_review.from_status)
+                to_name = STATUS_NAMES.get(last_review.to_status, last_review.to_status)
+                review_status_change = f"{from_name} → {to_name}"
+                review_handler = last_review.handler
+                review_remark = last_review.remark
+
             for sr in d.source_rows:
                 writer.writerow({
                     "缺陷ID": d.defect_id,
@@ -91,7 +105,11 @@ def export_csv_with_sources(
                     "来源行号": sr.line_number,
                     "导入时间": sr.import_time,
                     "处理人": d.handler,
-                    "复核备注": d.review_remark
+                    "复核备注": d.review_remark,
+                    "最近复核时间": review_time,
+                    "最近复核状态变更": review_status_change,
+                    "最近复核人": review_handler,
+                    "最近复核备注": review_remark
                 })
                 row_count += 1
 
@@ -241,6 +259,62 @@ def export_html(
   </div>
         """.strip()
 
+    recent_reviews_html = ""
+    recent_reviews = state.get_review_logs(limit=5)
+    if recent_reviews:
+        type_labels = {"review": "单条复核", "batch_review": "批量复核", "undo": "撤销"}
+        review_rows = []
+        for log in recent_reviews:
+            type_label = type_labels.get(log.log_type, log.log_type)
+            type_badge_color = {
+                "review": "#3b82f6",
+                "batch_review": "#8b5cf6",
+                "undo": "#f59e0b"
+            }.get(log.log_type, "#6b7280")
+
+            if log.log_type == "undo":
+                status_text = log.remark
+                defect_text = "-"
+                handler_text = "-"
+            else:
+                from_name = STATUS_NAMES.get(log.from_status, log.from_status)
+                to_name = STATUS_NAMES.get(log.to_status, log.to_status)
+                status_text = f"{from_name} → {to_name}"
+                defect_text = log.defect_id
+                handler_text = log.handler or "-"
+
+            review_rows.append(f"""
+            <tr>
+              <td><span class="badge" style="background:{type_badge_color}">{type_label}</span></td>
+              <td class="mono">{defect_text}</td>
+              <td>{status_text}</td>
+              <td>{handler_text}</td>
+              <td>{log.timestamp[:19] if log.timestamp else '-'}</td>
+              <td>{log.remark if log.log_type != 'undo' else ''}</td>
+            </tr>
+            """)
+
+        recent_reviews_html = f"""
+  <div class="last-import">
+    <h3>最近复核记录（最近 {len(recent_reviews)} 条）</h3>
+    <table class="review-table">
+      <thead>
+        <tr>
+          <th>操作类型</th>
+          <th>缺陷ID</th>
+          <th>状态变更</th>
+          <th>处理人</th>
+          <th>时间</th>
+          <th>备注</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(review_rows)}
+      </tbody>
+    </table>
+  </div>
+        """.strip()
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -268,6 +342,9 @@ def export_html(
   .import-stats {{ display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: #64748b; }}
   .import-error {{ margin-top: 8px; padding: 8px 12px; background: #fef2f2;
                    border-left: 3px solid #ef4444; color: #b91c1c; font-size: 13px; border-radius: 4px; }}
+  .review-table {{ width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }}
+  .review-table th, .review-table td {{ padding: 8px 10px; text-align: left; border-bottom: 1px solid #e2e8f0; }}
+  .review-table th {{ background: #f8fafc; font-weight: 600; color: #475569; font-size: 12px; }}
   .table-wrapper {{ background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; }}
   table {{ width: 100%; border-collapse: collapse; }}
   th, td {{ padding: 12px 14px; text-align: left; border-bottom: 1px solid #e2e8f0; }}
@@ -294,6 +371,7 @@ def export_html(
     批次号：{state.batch_id or '-'} | 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 缺陷总数：{total}
   </div>
   {last_import_html}
+  {recent_reviews_html}
   <div class="stats">{stats_html}</div>
   <div class="table-wrapper">
     <table>

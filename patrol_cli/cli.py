@@ -269,6 +269,70 @@ def import_log_cmd(ctx, limit, log_type):
         click.echo(f"... 还有 {total_all - limit} 条历史记录")
 
 
+@cli.command("review-log")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.option("--defect-id", "-d", default=None, help="按缺陷编号筛选")
+@click.option("--handler", "-H", default=None, help="按处理人筛选")
+@click.option("--type", "log_type", default=None,
+              type=click.Choice(["review", "batch_review", "undo"]),
+              help="按操作类型筛选")
+@click.pass_context
+def review_log_cmd(ctx, limit, defect_id, handler, log_type):
+    """查看复核操作历史"""
+    state = _get_state(ctx.obj["data_dir"])
+
+    logs = state.get_review_logs(
+        defect_id=defect_id or "",
+        handler=handler or "",
+        log_type=log_type or "",
+        limit=limit
+    )
+
+    if not logs:
+        click.echo("暂无复核日志")
+        return
+
+    click.echo(click.style(f"=== 复核日志 (最近 {len(logs)} 条) ===", bold=True))
+    click.echo()
+
+    type_labels = {
+        "review": "单条复核",
+        "batch_review": "批量复核",
+        "undo": "撤销"
+    }
+
+    for i, log in enumerate(logs, 1):
+        type_label = type_labels.get(log.log_type, log.log_type)
+        type_color = {
+            "review": "cyan",
+            "batch_review": "blue",
+            "undo": "yellow"
+        }.get(log.log_type, "white")
+
+        if log.log_type == "undo":
+            click.echo(f"[{i}] {click.style(type_label, fg=type_color)} "
+                       f"- {log.remark}")
+            click.echo(f"    时间: {log.timestamp[:19]}  批次: {log.batch_id or '-'}")
+        else:
+            from_name = STATUS_NAMES.get(log.from_status, log.from_status)
+            to_name = STATUS_NAMES.get(log.to_status, log.to_status)
+            click.echo(f"[{i}] {click.style(type_label, fg=type_color)} "
+                       f"{click.style(log.defect_id, fg='cyan')} "
+                       f"{from_name} {_sym('arrow')} {to_name}")
+            click.echo(f"    时间: {log.timestamp[:19]}  批次: {log.batch_id or '-'}")
+            if log.handler:
+                click.echo(f"    处理人: {log.handler}")
+            if log.remark:
+                click.echo(f"    备注: {log.remark}")
+            if log.parent_log_id:
+                click.echo(f"    批次组: {log.parent_log_id}")
+        click.echo()
+
+    total_all = len(state.review_logs)
+    if total_all > limit:
+        click.echo(f"... 还有 {total_all - limit} 条历史记录")
+
+
 @cli.command("list")
 @click.option("--status", "-s", default=None,
               type=click.Choice(["pending", "dispatched", "false_positive", "closed"]),
@@ -505,6 +569,21 @@ def show(ctx, defect_id):
             remark = h.get("remark", "")
             click.echo(f"  {h['time'][:19]}: {from_name} {_sym('arrow')} {to_name} "
                        f"[{handler}] {remark}")
+
+    last_review = state.get_last_review_log(defect_id=defect_id)
+    if last_review:
+        click.echo()
+        click.echo("最近复核摘要:")
+        type_labels = {"review": "单条复核", "batch_review": "批量复核"}
+        type_label = type_labels.get(last_review.log_type, last_review.log_type)
+        from_name = STATUS_NAMES.get(last_review.from_status, last_review.from_status)
+        to_name = STATUS_NAMES.get(last_review.to_status, last_review.to_status)
+        click.echo(f"  操作类型: {type_label}")
+        click.echo(f"  状态变更: {from_name} {_sym('arrow')} {to_name}")
+        click.echo(f"  处理人: {last_review.handler or '-'}")
+        click.echo(f"  备注: {last_review.remark or '-'}")
+        click.echo(f"  时间: {last_review.timestamp[:19]}")
+        click.echo(f"  批次: {last_review.batch_id or '-'}")
 
 
 def main():

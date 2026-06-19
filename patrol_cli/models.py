@@ -126,3 +126,25 @@ class ImportLogEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ImportLogEntry":
         return cls(**data)
+
+
+@dataclass
+class ReviewLogEntry:
+    """复核日志条目"""
+    log_id: str = ""
+    log_type: str = "review"
+    defect_id: str = ""
+    from_status: str = ""
+    to_status: str = ""
+    handler: str = ""
+    remark: str = ""
+    timestamp: str = ""
+    batch_id: str = ""
+    parent_log_id: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ReviewLogEntry":
+        return cls(**data)

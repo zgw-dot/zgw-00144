@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, SourceRow, ImportLogEntry
+from .models import DefectRecord, SourceRow, ImportLogEntry, ReviewLogEntry
 
 
 class PatrolState:
@@ -20,12 +20,14 @@ class PatrolState:
         self.undo_stack_file = self.data_dir / "undo_stack.json"
         self.meta_file = self.data_dir / "meta.json"
         self.import_log_file = self.data_dir / "import_log.json"
+        self.review_log_file = self.data_dir / "review_log.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
         self.batch_id: str = ""
         self.imported_files: List[str] = []
         self.import_logs: List[ImportLogEntry] = []
+        self.review_logs: List[ReviewLogEntry] = []
 
         self._load()
 
@@ -53,6 +55,11 @@ class PatrolState:
                 logs_data = json.load(f)
                 self.import_logs = [ImportLogEntry.from_dict(d) for d in logs_data]
 
+        if self.review_log_file.exists():
+            with open(self.review_log_file, "r", encoding="utf-8") as f:
+                review_data = json.load(f)
+                self.review_logs = [ReviewLogEntry.from_dict(d) for d in review_data]
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -74,6 +81,7 @@ class PatrolState:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
         self.save_import_logs()
+        self.save_review_logs()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -132,17 +140,18 @@ class PatrolState:
         return filename in self.imported_files
 
     def snapshot_defects(self) -> Dict[str, Any]:
-        """获取缺陷快照（用于撤销），包含 imported_files 和 import_logs 状态"""
+        """获取缺陷快照（用于撤销），包含 imported_files、import_logs 和 review_logs 状态"""
         snapshot = {
             defect_id: defect.to_dict()
             for defect_id, defect in self.defects.items()
         }
         snapshot["__imported_files__"] = list(self.imported_files)
         snapshot["__import_logs__"] = [log.to_dict() for log in self.import_logs]
+        snapshot["__review_logs__"] = [log.to_dict() for log in self.review_logs]
         return snapshot
 
     def restore_defects(self, snapshot: Dict[str, Any]):
-        """从快照恢复缺陷、imported_files 和 import_logs"""
+        """从快照恢复缺陷、imported_files、import_logs 和 review_logs"""
         self.defects = {}
         for key, def_data in snapshot.items():
             if key == "__imported_files__":
@@ -150,6 +159,9 @@ class PatrolState:
                 continue
             if key == "__import_logs__":
                 self.import_logs = [ImportLogEntry.from_dict(d) for d in def_data]
+                continue
+            if key == "__review_logs__":
+                self.review_logs = [ReviewLogEntry.from_dict(d) for d in def_data]
                 continue
             self.defects[key] = DefectRecord.from_dict(def_data)
 
@@ -175,6 +187,40 @@ class PatrolState:
         logs = self.get_import_logs()
         if log_type:
             logs = [l for l in logs if l.log_type == log_type]
+        return logs[0] if logs else None
+
+    def add_review_log(self, log_entry: ReviewLogEntry):
+        """添加复核日志"""
+        self.review_logs.append(log_entry)
+
+    def save_review_logs(self):
+        """单独保存复核日志"""
+        logs_data = [log.to_dict() for log in self.review_logs]
+        with open(self.review_log_file, "w", encoding="utf-8") as f:
+            json.dump(logs_data, f, ensure_ascii=False, indent=2)
+
+    def get_review_logs(
+        self,
+        defect_id: str = "",
+        handler: str = "",
+        log_type: str = "",
+        limit: int = 0
+    ) -> List[ReviewLogEntry]:
+        """获取复核日志，按时间倒序，支持筛选"""
+        logs = sorted(self.review_logs, key=lambda x: x.timestamp, reverse=True)
+        if defect_id:
+            logs = [l for l in logs if l.defect_id == defect_id]
+        if handler:
+            logs = [l for l in logs if l.handler == handler]
+        if log_type:
+            logs = [l for l in logs if l.log_type == log_type]
+        if limit > 0:
+            return logs[:limit]
+        return logs
+
+    def get_last_review_log(self, defect_id: str = "") -> Optional[ReviewLogEntry]:
+        """获取最近一次复核日志"""
+        logs = self.get_review_logs(defect_id=defect_id)
         return logs[0] if logs else None
 
     def stats(self) -> Dict[str, Any]:
