@@ -1,0 +1,76 @@
+{
+  "templates": {
+    "TPL-EXAMPLE-001": {
+      "template_id": "TPL-EXAMPLE-001",
+      "name": "日常巡检派单",
+      "target_status": "dispatched",
+      "handler": "张工",
+      "remark": "标准巡检派单处理流程",
+      "source_type": "daily_patrol",
+      "description": "用于日常巡检发现的缺陷派单处理",
+      "created_at": "2024-01-15T09:00:00",
+      "updated_at": "2024-03-10T14:30:00"
+    },
+    "TPL-EXAMPLE-002": {
+      "template_id": "TPL-EXAMPLE-002",
+      "name": "误报标记",
+      "target_status": "false_positive",
+      "handler": "李工",
+      "remark": "经确认确认为误报",
+      "source_type": "manual_review",
+      "description": "用于误报缺陷的标记处理",
+      "created_at": "2024-02-01T10:00:00",
+      "updated_at": "2024-02-01T10:00:00"
+    }
+  },
+  "versions": {
+    "VER-EXAMPLE-001": {
+      "version_id": "VER-EXAMPLE-001",
+      "template_id": "TPL-EXAMPLE-001",
+      "template_name": "日常巡检派单",
+      "version_name": "v1.0",
+      "target_status": "dispatched",
+      "handler": "张工",
+      "remark": "初始版本",
+      "source_type": "daily_patrol",
+      "description": "日常巡检派单初始版本",
+      "template_snapshot": {
+        "template_id": "TPL-EXAMPLE-001",
+        "name": "日常巡检派单",
+        "target_status": "dispatched",
+        "handler": "张工",
+        "remark": "初始版本",
+        "source_type": "daily_patrol",
+        "description": "日常巡检派单初始版本",
+        "created_at": "2024-01-15T09:00:00",
+        "updated_at": "2024-01-15T09:00:00"
+      },
+      "published_at": "2024-01-15T09:00:00",
+      "published_by": "管理员"
+    },
+    "VER-EXAMPLE-002": {
+      "version_id": "VER-EXAMPLE-002",
+      "template_id": "TPL-EXAMPLE-001",
+      "template_name": "日常巡检派单",
+      "version_name": "v2.0",
+      "target_status": "dispatched",
+      "handler": "王工",
+      "remark": "更新处理人为王工",
+      "source_type": "daily_patrol",
+      "description": "更新处理人后的版本",
+      "template_snapshot": {
+        "template_id": "TPL-EXAMPLE-001",
+        "name": "日常巡检派单",
+        "target_status": "dispatched",
+        "handler": "王工",
+        "remark": "更新处理人为王工",
+        "source_type": "daily_patrol",
+        "description": "更新处理人后的版本",
+        "created_at": "2024-01-15T09:00:00",
+        "updated_at": "2024-03-10T14:30:00"
+      },
+      "published_at": "2024-03-10T14:30:00",
+      "published_by": "管理员"
+    }
+  }
+}

@@ -13,7 +13,10 @@ from .workflow import (
     create_draft, preview_draft, execute_draft, void_draft,
     create_template, update_template, delete_template,
     import_templates, export_templates, create_draft_from_template,
-    snapshot_health_check, snapshot_patch
+    snapshot_health_check, snapshot_patch,
+    publish_version, list_versions, get_version, compare_versions,
+    preview_restore_version, restore_version,
+    precheck_import_conflicts, import_with_versions, export_with_versions
 )
 from .models import DRAFT_STATUS_NAMES
 from .exporter import export_csv, export_csv_with_sources, export_html, export_draft_csv, export_draft_list_csv, export_health_check_csv, export_health_check_json
@@ -1651,6 +1654,295 @@ def snapshot_patch_cmd(ctx, draft_ids, dry_run):
             name = draft.name if draft else did
             click.echo(f"  {_sym('check')} {did}: {name}")
         click.echo(f"  审计ID: {result['audit_id']}")
+
+
+@cli.group()
+@click.pass_context
+def version(ctx):
+    pass
+
+
+@version.command("publish")
+@click.argument("template_id_or_name")
+@click.option("--name", "-n", required=True, help="版本名称（如 v1.0、2024Q1）")
+@click.option("--published-by", "-b", default="", help="发布人")
+@click.pass_context
+def version_publish(ctx, template_id_or_name, name, published_by):
+    state = _get_state(ctx.obj["data_dir"])
+
+    template = state.get_template(template_id_or_name)
+    if not template:
+        template = state.get_template_by_name(template_id_or_name)
+    if not template:
+        click.echo(click.style(f"错误: 模板不存在: {template_id_or_name}", fg="red"), err=True)
+        sys.exit(1)
+
+    try:
+        ver = publish_version(state, template.template_id, name, published_by=published_by)
+        status_name = STATUS_NAMES.get(ver.target_status, ver.target_status)
+        click.echo(click.style(f"版本发布成功: {ver.version_id}", fg="green"))
+        click.echo(f"  模板: {ver.template_name} ({ver.template_id})")
+        click.echo(f"  版本名: {ver.version_name}")
+        click.echo(f"  目标状态: {status_name}")
+        click.echo(f"  处理人: {ver.handler or '-'}")
+        click.echo(f"  备注: {ver.remark or '-'}")
+        click.echo(f"  来源: {ver.source_type or '-'}")
+        click.echo(f"  发布时间: {ver.published_at[:19]}")
+        if published_by:
+            click.echo(f"  发布人: {published_by}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@version.command("list")
+@click.option("--template", "-t", "template_id_or_name", default=None, help="按模板ID或名称筛选")
+@click.option("--limit", "-n", default=20, help="显示条数", show_default=True)
+@click.pass_context
+def version_list(ctx, template_id_or_name, limit):
+    state = _get_state(ctx.obj["data_dir"])
+
+    template_id = ""
+    if template_id_or_name:
+        tpl = state.get_template(template_id_or_name)
+        if not tpl:
+            tpl = state.get_template_by_name(template_id_or_name)
+        if tpl:
+            template_id = tpl.template_id
+        else:
+            click.echo(click.style(f"错误: 模板不存在: {template_id_or_name}", fg="red"), err=True)
+            sys.exit(1)
+
+    versions = list_versions(state, template_id=template_id)
+
+    if not versions:
+        click.echo("暂无版本记录")
+        return
+
+    display = versions[:limit]
+
+    click.echo(click.style(f"=== 版本列表 (共 {len(versions)} 条) ===", bold=True))
+    click.echo()
+
+    for i, ver in enumerate(display, 1):
+        status_name = STATUS_NAMES.get(ver.target_status, ver.target_status)
+        click.echo(f"[{i}] {click.style(ver.version_id, fg='cyan')} - {ver.version_name}")
+        click.echo(f"    模板: {ver.template_name} ({ver.template_id})")
+        click.echo(f"    目标状态: {status_name}  处理人: {ver.handler or '-'}  "
+                   f"备注: {ver.remark or '-'}  来源: {ver.source_type or '-'}")
+        click.echo(f"    发布时间: {ver.published_at[:19]}")
+        if ver.published_by:
+            click.echo(f"    发布人: {ver.published_by}")
+        click.echo()
+
+    if len(versions) > limit:
+        click.echo(f"... 还有 {len(versions) - limit} 条，使用 -n 调整显示数量")
+
+
+@version.command("show")
+@click.argument("version_id")
+@click.pass_context
+def version_show(ctx, version_id):
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        ver = get_version(state, version_id)
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    status_name = STATUS_NAMES.get(ver.target_status, ver.target_status)
+
+    click.echo(click.style(f"=== {ver.version_name} ===", bold=True, fg="cyan"))
+    click.echo(f"版本ID: {ver.version_id}")
+    click.echo(f"模板: {ver.template_name} ({ver.template_id})")
+    click.echo(f"目标状态: {status_name}")
+    click.echo(f"处理人: {ver.handler or '-'}")
+    click.echo(f"备注: {ver.remark or '-'}")
+    click.echo(f"来源: {ver.source_type or '-'}")
+    click.echo(f"描述: {ver.description or '-'}")
+    click.echo(f"发布时间: {ver.published_at[:19]}")
+    if ver.published_by:
+        click.echo(f"发布人: {ver.published_by}")
+
+    tpl = state.get_template(ver.template_id)
+    if not tpl:
+        click.echo(click.style("  [当前模板已删除，版本历史仍可查看]", fg="yellow"))
+
+
+@version.command("compare")
+@click.argument("version_a_id")
+@click.argument("version_b_id")
+@click.pass_context
+def version_compare(ctx, version_a_id, version_b_id):
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        result = compare_versions(state, version_a_id, version_b_id)
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    click.echo(click.style("=== 版本比较 ===", bold=True, fg="cyan"))
+    click.echo(f"版本A: {result.version_a_name} ({result.version_a_id})")
+    click.echo(f"版本B: {result.version_b_name} ({result.version_b_id})")
+    click.echo()
+
+    if result.is_same:
+        click.echo(click.style(f"{_sym('check')} 两个版本在比较字段上完全一致", fg="green"))
+    else:
+        click.echo(click.style(f"发现 {len(result.diffs)} 处差异:", fg="yellow", bold=True))
+        for diff in result.diffs:
+            click.echo(f"  {diff.field_label}:")
+            click.echo(f"    版本A: {diff.old_value or '(空)'}")
+            click.echo(f"    版本B: {diff.new_value or '(空)'}")
+            click.echo()
+
+
+@version.command("restore")
+@click.argument("version_id")
+@click.option("--dry-run", is_flag=True, help="仅预览恢复效果，不落盘")
+@click.pass_context
+def version_restore(ctx, version_id, dry_run):
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        preview = preview_restore_version(state, version_id)
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    click.echo(click.style("=== 版本恢复预览 ===", bold=True, fg="cyan"))
+    click.echo(f"版本: {preview.version_name} ({preview.version_id})")
+    click.echo(f"模板: {preview.template_name} ({preview.template_id})")
+    click.echo()
+
+    if not preview.diffs:
+        click.echo(click.style(f"{_sym('check')} 当前模板与版本一致，无需恢复", fg="green"))
+        return
+
+    click.echo(click.style(f"将变更 {len(preview.diffs)} 处:", fg="yellow", bold=True))
+    for diff in preview.diffs:
+        click.echo(f"  {diff.field_label}:")
+        click.echo(f"    当前: {diff.old_value or '(空)'}")
+        click.echo(f"    恢复为: {diff.new_value or '(空)'}")
+    click.echo()
+
+    if dry_run:
+        click.echo(click.style("预览模式 (dry-run)，不执行恢复", fg="cyan"))
+        return
+
+    try:
+        template = restore_version(state, version_id)
+        status_name = STATUS_NAMES.get(template.target_status, template.target_status)
+        click.echo(click.style(f"恢复成功: {template.name}", fg="green", bold=True))
+        click.echo(f"  目标状态: {status_name}")
+        click.echo(f"  处理人: {template.handler or '-'}")
+        click.echo(f"  备注: {template.remark or '-'}")
+        click.echo(f"  更新时间: {template.updated_at[:19]}")
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@version.command("import")
+@click.argument("json_file", type=click.Path(exists=True))
+@click.option("--strategy", "-s", type=click.Choice(["overwrite", "save_as", "skip", "abort"]),
+              default="skip", help="冲突处理策略", show_default=True)
+@click.option("--dry-run", is_flag=True, help="仅预检冲突，不导入")
+@click.pass_context
+def version_import(ctx, json_file, strategy, dry_run):
+    state = _get_state(ctx.obj["data_dir"])
+
+    try:
+        if dry_run:
+            result = precheck_import_conflicts(state, json_file)
+            click.echo(click.style("=== 导入预检结果 ===", bold=True, fg="cyan"))
+            click.echo(f"文件: {json_file}")
+            click.echo(f"待导入模板: {result.total_import_templates} 个")
+            click.echo(f"待导入版本: {result.total_import_versions} 个")
+            click.echo()
+
+            if result.has_conflicts:
+                click.echo(click.style(f"发现 {len(result.conflicts)} 个冲突:", fg="yellow", bold=True))
+                for c in result.conflicts:
+                    click.echo(f"  {_sym('warn')} {c.template_name}")
+                    click.echo(f"      冲突类型: {c.conflict_type}")
+                    click.echo(f"      本地来源: {c.local_version_source or '-'}  导入来源: {c.import_version_source or '-'}")
+                    if c.local_versions:
+                        click.echo(f"      本地版本: {', '.join(c.local_versions)}")
+                    if c.import_versions:
+                        click.echo(f"      导入版本: {', '.join(c.import_versions)}")
+                    click.echo()
+                click.echo("可选策略: overwrite(覆盖) / save_as(另存) / skip(跳过) / abort(整批失败)")
+            else:
+                click.echo(click.style(f"{_sym('check')} 无冲突，可安全导入", fg="green"))
+            return
+
+        result = import_with_versions(state, json_file, conflict_strategy=strategy)
+
+        click.echo(click.style("=== 导入结果 ===", bold=True))
+        click.echo(f"文件: {json_file}")
+        click.echo(f"冲突策略: {strategy}")
+        click.echo()
+
+        if result["imported_templates"]:
+            click.echo(click.style(f"成功导入模板 {len(result['imported_templates'])} 个:", fg="green"))
+            for name in result["imported_templates"]:
+                click.echo(f"  {_sym('check')} {name}")
+            click.echo()
+
+        if result["imported_versions"]:
+            click.echo(click.style(f"成功导入版本 {len(result['imported_versions'])} 个:", fg="green"))
+            for name in result["imported_versions"]:
+                click.echo(f"  {_sym('check')} {name}")
+            click.echo()
+
+        if result["saved_as"]:
+            click.echo(click.style(f"另存 {len(result['saved_as'])} 个:", fg="cyan"))
+            for name in result["saved_as"]:
+                click.echo(f"  {_sym('arrow')} {name}")
+            click.echo()
+
+        if result["skipped"]:
+            click.echo(click.style(f"跳过 {len(result['skipped'])} 个:", fg="yellow"))
+            for name in result["skipped"]:
+                click.echo(f"  {_sym('warn')} {name}")
+            click.echo()
+
+        if result["errors"]:
+            click.echo(click.style(f"错误 {len(result['errors'])} 个:", fg="red"))
+            for err in result["errors"]:
+                click.echo(f"  {_sym('cross')} {err}")
+            click.echo()
+
+        click.echo(f"审计ID: {result['audit_id']}")
+
+    except WorkflowError as e:
+        click.echo(click.style(f"错误: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+
+@version.command("export")
+@click.argument("output_file")
+@click.option("--ids", default=None, help="逗号分隔的模板ID列表，不指定则导出全部")
+@click.pass_context
+def version_export(ctx, output_file, ids):
+    state = _get_state(ctx.obj["data_dir"])
+
+    template_ids = None
+    if ids:
+        template_ids = [x.strip() for x in ids.split(",") if x.strip()]
+
+    try:
+        count = export_with_versions(state, output_file, template_ids=template_ids)
+        versions_count = sum(len(state.list_versions(template_id=tid)) for tid in (template_ids or [t.template_id for t in state.list_templates()]))
+        click.echo(click.style(f"导出成功: {output_file}", fg="green"))
+        click.echo(f"  模板数量: {count}")
+        click.echo(f"  版本数量: {versions_count}")
+    except Exception as e:
+        click.echo(click.style(f"导出失败: {e}", fg="red"), err=True)
+        sys.exit(1)
 
 
 def main():

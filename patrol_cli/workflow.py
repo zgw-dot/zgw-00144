@@ -5,7 +5,9 @@ from typing import Optional, List, Tuple
 from .models import (
     DefectRecord, STATUS_NAMES, DEFECT_STATUSES, ReviewLogEntry, generate_log_id,
     DraftEntry, DraftItem, DraftExecutionResult, generate_draft_id,
-    DraftTemplate, generate_template_id, AuditLogEntry, generate_audit_id
+    DraftTemplate, generate_template_id, AuditLogEntry, generate_audit_id,
+    TemplateVersion, generate_version_id, VersionDiffItem, VersionCompareResult,
+    VersionRestorePreview, ImportConflictItem, ImportConflictResult
 )
 from .storage import PatrolState
 
@@ -805,7 +807,13 @@ def update_template(
         existing = state.get_template_by_name(name.strip())
         if existing and existing.template_id != template_id:
             raise WorkflowError(f"模板名称已存在: {name}")
+        old_name = template.name
         template.name = name.strip()
+        if old_name != name.strip():
+            for ver in state.versions.values():
+                if ver.template_id == template_id:
+                    ver.template_name = name.strip()
+            state.save_versions()
 
     if target_status is not None:
         if target_status not in DEFECT_STATUSES:
@@ -830,14 +838,16 @@ def update_template(
 
 
 def delete_template(state: PatrolState, template_id: str) -> bool:
-    """删除模板"""
     template = state.get_template(template_id)
     if not template:
         raise WorkflowError(f"模板不存在: {template_id}")
 
+    deleted_versions = state.delete_versions_by_template(template_id)
     success = state.delete_template(template_id)
     if success:
         state.save_templates()
+        if deleted_versions > 0:
+            state.save_versions()
     return success
 
 
@@ -1313,3 +1323,538 @@ def snapshot_patch(
         "errors": [],
         "audit_id": audit_id
     }
+
+
+VERSION_COMPARE_FIELDS = [
+    ("target_status", "目标状态"),
+    ("handler", "处理人"),
+    ("remark", "备注"),
+    ("source_type", "来源"),
+]
+
+
+def publish_version(
+    state: PatrolState,
+    template_id: str,
+    version_name: str,
+    published_by: str = ""
+) -> TemplateVersion:
+    template = state.get_template(template_id)
+    if not template:
+        raise WorkflowError(f"模板不存在: {template_id}")
+
+    if not version_name.strip():
+        raise WorkflowError("版本名称不能为空")
+
+    existing = state.get_version_by_name(template_id, version_name.strip())
+    if existing:
+        raise WorkflowError(f"模板 {template.name} 已存在同名版本: {version_name}")
+
+    now = datetime.now().isoformat()
+    version_id = generate_version_id()
+
+    version = TemplateVersion(
+        version_id=version_id,
+        template_id=template_id,
+        template_name=template.name,
+        version_name=version_name.strip(),
+        target_status=template.target_status,
+        handler=template.handler,
+        remark=template.remark,
+        source_type=template.source_type,
+        description=template.description,
+        template_snapshot=template.to_dict(),
+        published_at=now,
+        published_by=published_by
+    )
+
+    state.add_version(version)
+    state.save_versions()
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="version_publish",
+        target_type="template",
+        target_id=template_id,
+        detail=f"发布版本 {version_name} (模板: {template.name})",
+        result="success",
+        timestamp=now
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return version
+
+
+def list_versions(
+    state: PatrolState,
+    template_id: str = ""
+) -> list:
+    return state.list_versions(template_id=template_id)
+
+
+def get_version(state: PatrolState, version_id: str) -> TemplateVersion:
+    version = state.get_version(version_id)
+    if not version:
+        raise WorkflowError(f"版本不存在: {version_id}")
+    return version
+
+
+def compare_versions(
+    state: PatrolState,
+    version_a_id: str,
+    version_b_id: str
+) -> VersionCompareResult:
+    ver_a = state.get_version(version_a_id)
+    if not ver_a:
+        raise WorkflowError(f"版本不存在: {version_a_id}")
+
+    ver_b = state.get_version(version_b_id)
+    if not ver_b:
+        raise WorkflowError(f"版本不存在: {version_b_id}")
+
+    diffs = []
+    for field_name, field_label in VERSION_COMPARE_FIELDS:
+        val_a = getattr(ver_a, field_name, "") or ""
+        val_b = getattr(ver_b, field_name, "") or ""
+        if val_a != val_b:
+            diffs.append(VersionDiffItem(
+                field_name=field_name,
+                field_label=field_label,
+                old_value=val_a,
+                new_value=val_b
+            ))
+
+    return VersionCompareResult(
+        version_a_id=ver_a.version_id,
+        version_a_name=ver_a.version_name,
+        version_b_id=ver_b.version_id,
+        version_b_name=ver_b.version_name,
+        diffs=diffs,
+        is_same=len(diffs) == 0
+    )
+
+
+def preview_restore_version(
+    state: PatrolState,
+    version_id: str
+) -> VersionRestorePreview:
+    version = state.get_version(version_id)
+    if not version:
+        raise WorkflowError(f"版本不存在: {version_id}")
+
+    template = state.get_template(version.template_id)
+
+    current_target_status = template.target_status if template else ""
+    current_handler = template.handler if template else ""
+    current_remark = template.remark if template else ""
+    current_source_type = template.source_type if template else ""
+
+    diffs = []
+    for field_name, field_label in VERSION_COMPARE_FIELDS:
+        cur_val = getattr(template, field_name, "") if template else ""
+        ver_val = getattr(version, field_name, "") or ""
+        if cur_val != ver_val:
+            diffs.append(VersionDiffItem(
+                field_name=field_name,
+                field_label=field_label,
+                old_value=cur_val,
+                new_value=ver_val
+            ))
+
+    return VersionRestorePreview(
+        version_id=version.version_id,
+        version_name=version.version_name,
+        template_id=version.template_id,
+        template_name=version.template_name,
+        current_target_status=current_target_status,
+        current_handler=current_handler,
+        current_remark=current_remark,
+        current_source_type=current_source_type,
+        restore_target_status=version.target_status,
+        restore_handler=version.handler,
+        restore_remark=version.remark,
+        restore_source_type=version.source_type,
+        diffs=diffs
+    )
+
+
+def restore_version(
+    state: PatrolState,
+    version_id: str
+) -> DraftTemplate:
+    version = state.get_version(version_id)
+    if not version:
+        raise WorkflowError(f"版本不存在: {version_id}")
+
+    template = state.get_template(version.template_id)
+    if not template:
+        raise WorkflowError(f"版本对应的模板已删除: {version.template_id}")
+
+    now = datetime.now().isoformat()
+    before_snapshot = template.to_dict()
+
+    template.target_status = version.target_status
+    template.handler = version.handler
+    template.remark = version.remark
+    template.source_type = version.source_type
+    template.updated_at = now
+
+    state.update_template(template)
+    state.save_templates()
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="version_restore",
+        target_type="template",
+        target_id=version.template_id,
+        detail=f"从版本 {version.version_name}({version_id}) 恢复模板 {template.name}",
+        result="success",
+        timestamp=now
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return template
+
+
+def precheck_import_conflicts(
+    state: PatrolState,
+    file_path: str
+) -> ImportConflictResult:
+    import json
+    from pathlib import Path
+
+    path = Path(file_path)
+    if not path.exists():
+        raise WorkflowError(f"文件不存在: {file_path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise WorkflowError(f"JSON 解析失败: {e}")
+
+    templates_data = []
+    versions_data = []
+
+    if isinstance(data, dict):
+        if "templates" in data or "versions" in data:
+            templates_data = data.get("templates", [])
+            if isinstance(templates_data, dict):
+                templates_data = list(templates_data.values())
+            versions_data = data.get("versions", [])
+            if isinstance(versions_data, dict):
+                versions_data = list(versions_data.values())
+        else:
+            templates_data = list(data.values())
+    elif isinstance(data, list):
+        templates_data = data
+
+    conflicts = []
+    for tpl_data in templates_data:
+        name = tpl_data.get("name", "").strip()
+        source = tpl_data.get("source_type", "")
+        import_id = tpl_data.get("template_id", "")
+
+        if not name:
+            continue
+
+        existing_by_name = state.get_template_by_name(name)
+        if existing_by_name:
+            local_source = existing_by_name.source_type or ""
+            local_versions = [v.version_name for v in state.list_versions(template_id=existing_by_name.template_id)]
+            import_versions = []
+            conflict_type = "name_conflict"
+            if local_source != source and source:
+                conflict_type = "name_conflict"
+
+            conflicts.append(ImportConflictItem(
+                template_name=name,
+                local_version_source=local_source,
+                import_version_source=source,
+                conflict_type=conflict_type,
+                local_template_id=existing_by_name.template_id,
+                import_template_id=import_id,
+                local_versions=local_versions,
+                import_versions=import_versions
+            ))
+
+    for ver_data in versions_data:
+        tpl_id = ver_data.get("template_id", "")
+        ver_name = ver_data.get("version_name", "")
+        source = ver_data.get("source_type", "")
+
+        if not tpl_id or not ver_name:
+            continue
+
+        existing_ver = state.get_version_by_name(tpl_id, ver_name)
+        if existing_ver:
+            local_source = existing_ver.source_type or ""
+            if local_source != source and source:
+                conflicts.append(ImportConflictItem(
+                    template_name=ver_data.get("template_name", ""),
+                    local_version_source=local_source,
+                    import_version_source=source,
+                    conflict_type="name_conflict",
+                    local_template_id=tpl_id,
+                    import_template_id=tpl_id,
+                    local_versions=[ver_name],
+                    import_versions=[ver_name]
+                ))
+
+    return ImportConflictResult(
+        conflicts=conflicts,
+        has_conflicts=len(conflicts) > 0,
+        total_import_templates=len(templates_data),
+        total_import_versions=len(versions_data)
+    )
+
+
+IMPORT_CONFLICT_STRATEGIES = ["overwrite", "save_as", "skip", "abort"]
+
+
+def import_with_versions(
+    state: PatrolState,
+    file_path: str,
+    conflict_strategy: str = "skip",
+    overwrite: bool = False
+) -> dict:
+    import json
+    from pathlib import Path
+
+    path = Path(file_path)
+    if not path.exists():
+        raise WorkflowError(f"文件不存在: {file_path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise WorkflowError(f"JSON 解析失败: {e}")
+
+    if conflict_strategy not in IMPORT_CONFLICT_STRATEGIES:
+        raise WorkflowError(f"无效的冲突策略: {conflict_strategy}，可选: {', '.join(IMPORT_CONFLICT_STRATEGIES)}")
+
+    templates_data = []
+    versions_data = []
+
+    if isinstance(data, dict):
+        if "templates" in data or "versions" in data:
+            raw_templates = data.get("templates", {})
+            if isinstance(raw_templates, dict):
+                templates_data = list(raw_templates.values())
+            elif isinstance(raw_templates, list):
+                templates_data = raw_templates
+            raw_versions = data.get("versions", {})
+            if isinstance(raw_versions, dict):
+                versions_data = list(raw_versions.values())
+            elif isinstance(raw_versions, list):
+                versions_data = raw_versions
+        else:
+            templates_data = list(data.values())
+    elif isinstance(data, list):
+        templates_data = data
+
+    precheck = precheck_import_conflicts(state, file_path)
+
+    if conflict_strategy == "abort" and precheck.has_conflicts:
+        audit_entry = AuditLogEntry(
+            audit_id=generate_audit_id(),
+            action="import_with_versions",
+            target_type="batch",
+            target_id=file_path,
+            detail=f"导入中止: 存在 {len(precheck.conflicts)} 个冲突",
+            result="failed",
+            timestamp=datetime.now().isoformat()
+        )
+        state.add_audit_log(audit_entry)
+        state.save_audit_logs()
+        return {
+            "imported_templates": [],
+            "imported_versions": [],
+            "skipped": [c.template_name for c in precheck.conflicts],
+            "errors": [f"冲突中止: {c.template_name} (本地来源={c.local_version_source}, 导入来源={c.import_version_source})" for c in precheck.conflicts],
+            "saved_as": [],
+            "audit_id": audit_entry.audit_id
+        }
+
+    imported_templates = []
+    imported_versions = []
+    skipped = []
+    saved_as = []
+    errors = []
+
+    for tpl_data in templates_data:
+        missing = [f for f in TEMPLATE_REQUIRED_FIELDS if f not in tpl_data or not tpl_data.get(f)]
+        if missing:
+            errors.append(f"模板缺少必填字段: {', '.join(missing)}")
+            continue
+
+        name = tpl_data.get("name", "").strip()
+        target_status = tpl_data.get("target_status", "")
+
+        if target_status not in DEFECT_STATUSES:
+            errors.append(f"模板 {name}: 无效的目标状态 {target_status}")
+            continue
+
+        existing_by_name = state.get_template_by_name(name)
+
+        if existing_by_name:
+            if conflict_strategy == "skip":
+                skipped.append(f"{name} (同名已存在)")
+                continue
+            elif conflict_strategy == "overwrite" or overwrite:
+                template_id = existing_by_name.template_id
+                template = DraftTemplate.from_dict(tpl_data)
+                template.template_id = template_id
+                template.created_at = existing_by_name.created_at
+                template.updated_at = datetime.now().isoformat()
+                state.update_template(template)
+                imported_templates.append(f"{name} (覆盖)")
+                continue
+            elif conflict_strategy == "save_as":
+                new_name = f"{name}-导入副本"
+                counter = 1
+                while state.get_template_by_name(new_name):
+                    new_name = f"{name}-导入副本{counter}"
+                    counter += 1
+                template = DraftTemplate.from_dict(tpl_data)
+                template.template_id = generate_template_id()
+                template.name = new_name
+                template.created_at = datetime.now().isoformat()
+                template.updated_at = template.created_at
+                state.add_template(template)
+                imported_templates.append(f"{new_name} (另存)")
+                saved_as.append(f"{name} -> {new_name}")
+                continue
+            else:
+                skipped.append(f"{name} (策略未处理)")
+                continue
+
+        template = DraftTemplate.from_dict(tpl_data)
+        if not template.template_id:
+            template.template_id = generate_template_id()
+        if not template.created_at:
+            template.created_at = datetime.now().isoformat()
+        if not template.updated_at:
+            template.updated_at = template.created_at
+
+        state.add_template(template)
+        imported_templates.append(name)
+
+    for ver_data in versions_data:
+        version_name = ver_data.get("version_name", "").strip()
+        template_id = ver_data.get("template_id", "")
+        if not version_name or not template_id:
+            errors.append(f"版本数据缺少 version_name 或 template_id")
+            continue
+
+        existing_ver = state.get_version_by_name(template_id, version_name)
+        if existing_ver:
+            if conflict_strategy == "skip":
+                skipped.append(f"版本 {version_name} (同名已存在)")
+                continue
+            elif conflict_strategy == "overwrite":
+                version = TemplateVersion.from_dict(ver_data)
+                version.version_id = existing_ver.version_id
+                state.update_version(version)
+                imported_versions.append(f"{version_name} (覆盖)")
+                continue
+            elif conflict_strategy == "save_as":
+                new_ver_name = f"{version_name}-导入副本"
+                counter = 1
+                while state.get_version_by_name(template_id, new_ver_name):
+                    new_ver_name = f"{version_name}-导入副本{counter}"
+                    counter += 1
+                version = TemplateVersion.from_dict(ver_data)
+                version.version_id = generate_version_id()
+                version.version_name = new_ver_name
+                state.add_version(version)
+                imported_versions.append(f"{new_ver_name} (另存)")
+                saved_as.append(f"版本 {version_name} -> {new_ver_name}")
+                continue
+            else:
+                skipped.append(f"版本 {version_name} (策略未处理)")
+                continue
+
+        version = TemplateVersion.from_dict(ver_data)
+        if not version.version_id:
+            version.version_id = generate_version_id()
+        state.add_version(version)
+        imported_versions.append(version_name)
+
+    state.save_templates()
+    state.save_versions()
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="import_with_versions",
+        target_type="batch",
+        target_id=file_path,
+        detail=f"导入模板 {len(imported_templates)} 个, 版本 {len(imported_versions)} 个, 跳过 {len(skipped)} 个, 另存 {len(saved_as)} 个, 错误 {len(errors)} 个",
+        result="success" if not errors else "partial",
+        timestamp=datetime.now().isoformat()
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return {
+        "imported_templates": imported_templates,
+        "imported_versions": imported_versions,
+        "skipped": skipped,
+        "errors": errors,
+        "saved_as": saved_as,
+        "audit_id": audit_entry.audit_id
+    }
+
+
+def export_with_versions(
+    state: PatrolState,
+    file_path: str,
+    template_ids: Optional[List[str]] = None
+) -> int:
+    import json
+    from pathlib import Path
+
+    if template_ids:
+        templates = []
+        for tid in template_ids:
+            tpl = state.get_template(tid)
+            if tpl:
+                templates.append(tpl)
+    else:
+        templates = state.list_templates()
+
+    templates_dict = {tpl.template_id: tpl.to_dict() for tpl in templates}
+
+    versions_dict = {}
+    for tpl in templates:
+        versions = state.list_versions(template_id=tpl.template_id)
+        for ver in versions:
+            versions_dict[ver.version_id] = ver.to_dict()
+
+    data = {
+        "templates": templates_dict,
+        "versions": versions_dict
+    }
+
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    audit_entry = AuditLogEntry(
+        audit_id=generate_audit_id(),
+        action="export_with_versions",
+        target_type="batch",
+        target_id=file_path,
+        detail=f"导出模板 {len(templates)} 个, 版本 {len(versions_dict)} 个",
+        result="success",
+        timestamp=datetime.now().isoformat()
+    )
+    state.add_audit_log(audit_entry)
+    state.save_audit_logs()
+
+    return len(templates)

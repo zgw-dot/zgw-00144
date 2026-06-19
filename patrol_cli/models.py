@@ -330,3 +330,193 @@ class AuditLogEntry:
             result=data.get("result", ""),
             timestamp=data.get("timestamp", "")
         )
+
+
+def generate_version_id() -> str:
+    return f"VER-{uuid.uuid4().hex[:10].upper()}"
+
+
+@dataclass
+class TemplateVersion:
+    version_id: str = ""
+    template_id: str = ""
+    template_name: str = ""
+    version_name: str = ""
+    target_status: str = ""
+    handler: str = ""
+    remark: str = ""
+    source_type: str = ""
+    description: str = ""
+    template_snapshot: Dict[str, Any] = field(default_factory=dict)
+    published_at: str = ""
+    published_by: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TemplateVersion":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class VersionDiffItem:
+    field_name: str = ""
+    field_label: str = ""
+    old_value: str = ""
+    new_value: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VersionDiffItem":
+        return cls(**data)
+
+
+@dataclass
+class VersionCompareResult:
+    version_a_id: str = ""
+    version_a_name: str = ""
+    version_b_id: str = ""
+    version_b_name: str = ""
+    diffs: List[VersionDiffItem] = field(default_factory=list)
+    is_same: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version_a_id": self.version_a_id,
+            "version_a_name": self.version_a_name,
+            "version_b_id": self.version_b_id,
+            "version_b_name": self.version_b_name,
+            "diffs": [d.to_dict() for d in self.diffs],
+            "is_same": self.is_same
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VersionCompareResult":
+        diffs = [VersionDiffItem.from_dict(d) for d in data.get("diffs", [])]
+        return cls(
+            version_a_id=data.get("version_a_id", ""),
+            version_a_name=data.get("version_a_name", ""),
+            version_b_id=data.get("version_b_id", ""),
+            version_b_name=data.get("version_b_name", ""),
+            diffs=diffs,
+            is_same=data.get("is_same", True)
+        )
+
+
+@dataclass
+class VersionRestorePreview:
+    version_id: str = ""
+    version_name: str = ""
+    template_id: str = ""
+    template_name: str = ""
+    current_target_status: str = ""
+    current_handler: str = ""
+    current_remark: str = ""
+    current_source_type: str = ""
+    restore_target_status: str = ""
+    restore_handler: str = ""
+    restore_remark: str = ""
+    restore_source_type: str = ""
+    diffs: List[VersionDiffItem] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version_id": self.version_id,
+            "version_name": self.version_name,
+            "template_id": self.template_id,
+            "template_name": self.template_name,
+            "current_target_status": self.current_target_status,
+            "current_handler": self.current_handler,
+            "current_remark": self.current_remark,
+            "current_source_type": self.current_source_type,
+            "restore_target_status": self.restore_target_status,
+            "restore_handler": self.restore_handler,
+            "restore_remark": self.restore_remark,
+            "restore_source_type": self.restore_source_type,
+            "diffs": [d.to_dict() for d in self.diffs]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VersionRestorePreview":
+        diffs = [VersionDiffItem.from_dict(d) for d in data.get("diffs", [])]
+        return cls(
+            version_id=data.get("version_id", ""),
+            version_name=data.get("version_name", ""),
+            template_id=data.get("template_id", ""),
+            template_name=data.get("template_name", ""),
+            current_target_status=data.get("current_target_status", ""),
+            current_handler=data.get("current_handler", ""),
+            current_remark=data.get("current_remark", ""),
+            current_source_type=data.get("current_source_type", ""),
+            restore_target_status=data.get("restore_target_status", ""),
+            restore_handler=data.get("restore_handler", ""),
+            restore_remark=data.get("restore_remark", ""),
+            restore_source_type=data.get("restore_source_type", ""),
+            diffs=diffs
+        )
+
+
+@dataclass
+class ImportConflictItem:
+    template_name: str = ""
+    local_version_source: str = ""
+    import_version_source: str = ""
+    conflict_type: str = ""
+    local_template_id: str = ""
+    import_template_id: str = ""
+    local_versions: List[str] = field(default_factory=list)
+    import_versions: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "template_name": self.template_name,
+            "local_version_source": self.local_version_source,
+            "import_version_source": self.import_version_source,
+            "conflict_type": self.conflict_type,
+            "local_template_id": self.local_template_id,
+            "import_template_id": self.import_template_id,
+            "local_versions": self.local_versions,
+            "import_versions": self.import_versions
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ImportConflictItem":
+        return cls(
+            template_name=data.get("template_name", ""),
+            local_version_source=data.get("local_version_source", ""),
+            import_version_source=data.get("import_version_source", ""),
+            conflict_type=data.get("conflict_type", ""),
+            local_template_id=data.get("local_template_id", ""),
+            import_template_id=data.get("import_template_id", ""),
+            local_versions=data.get("local_versions", []),
+            import_versions=data.get("import_versions", [])
+        )
+
+
+@dataclass
+class ImportConflictResult:
+    conflicts: List[ImportConflictItem] = field(default_factory=list)
+    has_conflicts: bool = False
+    total_import_templates: int = 0
+    total_import_versions: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "conflicts": [c.to_dict() for c in self.conflicts],
+            "has_conflicts": self.has_conflicts,
+            "total_import_templates": self.total_import_templates,
+            "total_import_versions": self.total_import_versions
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ImportConflictResult":
+        conflicts = [ImportConflictItem.from_dict(c) for c in data.get("conflicts", [])]
+        return cls(
+            conflicts=conflicts,
+            has_conflicts=data.get("has_conflicts", False),
+            total_import_templates=data.get("total_import_templates", 0),
+            total_import_versions=data.get("total_import_versions", 0)
+        )

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry
+from .models import DefectRecord, ImportLogEntry, ReviewLogEntry, DraftEntry, DraftTemplate, AuditLogEntry, TemplateVersion
 
 
 class PatrolState:
@@ -23,6 +23,7 @@ class PatrolState:
         self.drafts_file = self.data_dir / "drafts.json"
         self.templates_file = self.data_dir / "templates.json"
         self.audit_log_file = self.data_dir / "audit_log.json"
+        self.versions_file = self.data_dir / "versions.json"
 
         self.defects: Dict[str, DefectRecord] = {}
         self.undo_stack: List[Dict[str, Any]] = []
@@ -33,6 +34,7 @@ class PatrolState:
         self.drafts: Dict[str, DraftEntry] = {}
         self.templates: Dict[str, DraftTemplate] = {}
         self.audit_logs: List[AuditLogEntry] = []
+        self.versions: Dict[str, TemplateVersion] = {}
 
         self._load()
 
@@ -84,6 +86,13 @@ class PatrolState:
                 audit_data = json.load(f)
                 self.audit_logs = [AuditLogEntry.from_dict(d) for d in audit_data]
 
+        if self.versions_file.exists():
+            with open(self.versions_file, "r", encoding="utf-8") as f:
+                versions_data = json.load(f)
+                self.versions = {}
+                for ver_id, ver_data in versions_data.items():
+                    self.versions[ver_id] = TemplateVersion.from_dict(ver_data)
+
     def save(self):
         """保存状态到磁盘"""
         defects_data = {
@@ -109,6 +118,7 @@ class PatrolState:
         self.save_drafts()
         self.save_templates()
         self.save_audit_logs()
+        self.save_versions()
 
     def init_batch(self, batch_id: str):
         """初始化新批次"""
@@ -385,3 +395,46 @@ class PatrolState:
         if limit > 0:
             return logs[:limit]
         return logs
+
+    def save_versions(self):
+        versions_data = {
+            ver_id: ver.to_dict()
+            for ver_id, ver in self.versions.items()
+        }
+        with open(self.versions_file, "w", encoding="utf-8") as f:
+            json.dump(versions_data, f, ensure_ascii=False, indent=2)
+
+    def add_version(self, version: TemplateVersion):
+        self.versions[version.version_id] = version
+
+    def get_version(self, version_id: str) -> Optional[TemplateVersion]:
+        return self.versions.get(version_id)
+
+    def get_version_by_name(self, template_id: str, version_name: str) -> Optional[TemplateVersion]:
+        for ver in self.versions.values():
+            if ver.template_id == template_id and ver.version_name == version_name:
+                return ver
+        return None
+
+    def update_version(self, version: TemplateVersion):
+        if version.version_id in self.versions:
+            self.versions[version.version_id] = version
+
+    def delete_version(self, version_id: str) -> bool:
+        if version_id in self.versions:
+            del self.versions[version_id]
+            return True
+        return False
+
+    def list_versions(self, template_id: str = "") -> List[TemplateVersion]:
+        versions = list(self.versions.values())
+        if template_id:
+            versions = [v for v in versions if v.template_id == template_id]
+        versions.sort(key=lambda v: v.published_at, reverse=True)
+        return versions
+
+    def delete_versions_by_template(self, template_id: str) -> int:
+        to_delete = [vid for vid, v in self.versions.items() if v.template_id == template_id]
+        for vid in to_delete:
+            del self.versions[vid]
+        return len(to_delete)
