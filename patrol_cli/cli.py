@@ -1542,7 +1542,35 @@ def template_export(ctx, output_file, ids):
 @cli.group()
 @click.pass_context
 def snapshot(ctx):
-    """快照体检与补档"""
+    """模板快照体检与封存。
+
+    \b
+    子命令:
+      check  快照体检——扫描所有草稿的快照完整性、缺失字段、来源冲突与补档风险
+      patch  快照补档——将当时模板封存为只读快照，补齐残缺/缺失字段后锁定
+
+    \b
+    典型流程:
+      1. snapshot check            先体检，看哪些草稿快照残缺/缺失/未封存
+      2. snapshot check -o out.csv 导出体检报告（csv/json）
+      3. snapshot patch --dry-run  预检补档，确认无冲突
+      4. snapshot patch --ids ...  正式补档封存
+
+    \b
+    快照三档分类:
+      complete   - 完整快照（name/target_status/handler 齐全）
+      incomplete - 残缺快照（部分关键字段缺失）
+      missing    - 老数据无快照（仅有 template_id，无 snapshot）
+
+    \b
+    冲突拦截规则:
+      - 重复草稿ID → 整批失败
+      - 非模板草稿 → 拦截
+      - 快照已封存 → 拦截
+      - 残缺快照且模板已删除 → 拦截
+      - 无快照且模板已删除 → 拦截
+      - 残缺快照中现有字段与当前模板不一致 → 来源冲突，整批拦截
+    """
     pass
 
 
@@ -1551,7 +1579,22 @@ def snapshot(ctx):
 @click.option("--format", "fmt", type=click.Choice(["csv", "json"]), default="csv", help="导出格式")
 @click.pass_context
 def snapshot_check(ctx, output, fmt):
-    """快照体检：扫描所有草稿快照完整性，不修改任何状态"""
+    """快照体检：扫描所有草稿的快照完整性，不修改任何状态。
+
+    \b
+    扫描内容:
+      - 快照三档分类（完整/残缺/缺失）
+      - 缺失字段清单
+      - 是否已封存
+      - 可否补档及不可补档原因
+      - 补档风险提示（来源冲突、模板已删等）
+
+    \b
+    用法示例:
+      patrol snapshot check                终端输出体检报告
+      patrol snapshot check -o report.csv  导出为 CSV
+      patrol snapshot check -o report.json --format json  导出为 JSON
+    """
     state = _get_state(ctx.obj["data_dir"])
 
     results = snapshot_health_check(state)
@@ -1608,7 +1651,22 @@ def snapshot_check(ctx, output, fmt):
 @click.option("--dry-run", is_flag=True, help="仅预检，不落盘")
 @click.pass_context
 def snapshot_patch_cmd(ctx, draft_ids, dry_run):
-    """快照补档：封存模板快照为只读副本"""
+    """快照补档：封存模板快照为只读副本。
+
+    \b
+    补档逻辑:
+      1. 先批次校验，遇到重复草稿、同批冲突、模板已删或关键字段对不上时整批拦住
+      2. 校验通过后，用当前模板字段填充 template_snapshot，设 snapshot_sealed_at
+      3. 补档后快照不可变，模板改名/删除/覆盖导入均不影响已封存快照
+      4. 每次补档操作记录审计日志，重启后可查询
+
+    \b
+    用法示例:
+      patrol snapshot patch --dry-run              预检所有可补档草稿
+      patrol snapshot patch --ids D-001,D-002      补档指定草稿
+      patrol snapshot patch                        补档所有可补档草稿
+      patrol snapshot patch --ids D-001 --dry-run  预检指定草稿
+    """
     state = _get_state(ctx.obj["data_dir"])
 
     if draft_ids:

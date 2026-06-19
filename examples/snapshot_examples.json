@@ -1,0 +1,127 @@
+{
+  "说明": "模板快照体检与封存示例数据，展示完整/残缺/缺失三种快照状态及补档封存后的数据结构",
+  "快照关键字段": ["name", "target_status", "handler"],
+  "示例草稿": {
+    "complete_snapshot_draft": {
+      "draft_id": "D-SNAP-EX-001",
+      "name": "日常巡检派单-1月",
+      "template_id": "TPL-SNAP-EX-001",
+      "template_snapshot": {
+        "template_id": "TPL-SNAP-EX-001",
+        "name": "日常巡检派单",
+        "target_status": "dispatched",
+        "handler": "张工",
+        "remark": "标准派单流程",
+        "source_type": "daily_patrol",
+        "description": "日常巡检缺陷派单模板",
+        "created_at": "2024-01-10T09:00:00",
+        "updated_at": "2024-01-10T09:00:00"
+      },
+      "snapshot_sealed_at": "",
+      "status": "executed",
+      "快照分类": "complete",
+      "说明": "从模板创建，快照完整（name/target_status/handler 齐全），但尚未封存"
+    },
+    "sealed_snapshot_draft": {
+      "draft_id": "D-SNAP-EX-002",
+      "name": "日常巡检派单-2月",
+      "template_id": "TPL-SNAP-EX-001",
+      "template_snapshot": {
+        "template_id": "TPL-SNAP-EX-001",
+        "name": "日常巡检派单",
+        "target_status": "dispatched",
+        "handler": "张工",
+        "remark": "标准派单流程",
+        "source_type": "daily_patrol",
+        "description": "日常巡检缺陷派单模板",
+        "created_at": "2024-01-10T09:00:00",
+        "updated_at": "2024-01-10T09:00:00"
+      },
+      "snapshot_sealed_at": "2024-02-15T14:30:00",
+      "status": "executed",
+      "快照分类": "complete（已封存）",
+      "说明": "补档封存后，快照不可变。模板改名/删除均不影响此快照"
+    },
+    "incomplete_snapshot_draft": {
+      "draft_id": "D-SNAP-EX-003",
+      "name": "旧版派单草稿",
+      "template_id": "TPL-SNAP-EX-002",
+      "template_snapshot": {
+        "name": "安全检查模板"
+      },
+      "snapshot_sealed_at": "",
+      "status": "executed",
+      "快照分类": "incomplete",
+      "缺失字段": ["target_status", "handler"],
+      "说明": "残缺快照，只保留了 name，缺 target_status 和 handler。若模板仍存在可补档"
+    },
+    "missing_snapshot_draft": {
+      "draft_id": "D-SNAP-EX-004",
+      "name": "老数据草稿",
+      "template_id": "TPL-SNAP-EX-003",
+      "template_snapshot": {},
+      "snapshot_sealed_at": "",
+      "status": "executed",
+      "快照分类": "missing",
+      "缺失字段": ["name", "target_status", "handler"],
+      "说明": "老数据仅有 template_id，无 template_snapshot。若模板仍存在可补档，模板已删则无法补档"
+    },
+    "non_template_draft": {
+      "draft_id": "D-SNAP-EX-005",
+      "name": "手动创建草稿",
+      "template_id": "",
+      "template_snapshot": {},
+      "snapshot_sealed_at": "",
+      "status": "pending",
+      "快照分类": "非模板草稿",
+      "说明": "非模板草稿，无法补档"
+    }
+  },
+  "示例模板": {
+    "TPL-SNAP-EX-001": {
+      "template_id": "TPL-SNAP-EX-001",
+      "name": "日常巡检派单",
+      "target_status": "dispatched",
+      "handler": "张工",
+      "remark": "标准派单流程",
+      "source_type": "daily_patrol",
+      "description": "日常巡检缺陷派单模板"
+    },
+    "TPL-SNAP-EX-002": {
+      "template_id": "TPL-SNAP-EX-002",
+      "name": "安全检查模板",
+      "target_status": "dispatched",
+      "handler": "李工",
+      "remark": "安全专项检查",
+      "source_type": "safety_check",
+      "description": "安全检查派单模板"
+    }
+  },
+  "体检输出示例": {
+    "说明": "snapshot check 命令的输出结构",
+    "字段": {
+      "草稿ID": "草稿唯一标识",
+      "草稿名称": "草稿名称",
+      "草稿状态": "待执行/已执行/已作废",
+      "模板ID": "关联的模板ID",
+      "模板是否存在": "模板在当前存储中是否仍存在",
+      "模板名称": "快照中的模板名称",
+      "快照状态": "完整快照/残缺快照/老数据无快照",
+      "缺失字段": "缺失的关键字段列表",
+      "是否已封存": "快照是否已封存（是/否）",
+      "可否补档": "是/否",
+      "不可补档原因": "不能补档的原因",
+      "风险原因": "补档风险提示"
+    }
+  },
+  "补档操作示例": {
+    "命令": "patrol snapshot patch --ids D-SNAP-EX-001,D-SNAP-EX-003",
+    "dry_run命令": "patrol snapshot patch --ids D-SNAP-EX-001,D-SNAP-EX-003 --dry-run",
+    "整批失败示例": {
+      "场景1_重复ID": "patrol snapshot patch --ids D-001,D-001 → 整批失败",
+      "场景2_非模板草稿混入": "patrol snapshot patch --ids D-001,D-SNAP-EX-005 → 整批失败（非模板草稿拦截）",
+      "场景3_来源冲突": "残缺快照中 name='安全检查模板' 但当前模板 name='安全检查-改名' → 整批失败",
+      "场景4_模板已删": "残缺快照且关联模板已删除 → 整批失败"
+    }
+  }
+}
