@@ -1,0 +1,86 @@
+[
+  {
+    "action": "导入文件 data.csv",
+    "timestamp": "2026-06-19T14:08:41.076161",
+    "snapshot": {
+      "__imported_files__": [],
+      "__import_logs__": []
+    }
+  },
+  {
+    "action": "复核 DEF-71671C8E73EA 待派单→已派单",
+    "timestamp": "2026-06-19T14:09:08.658525",
+    "snapshot": {
+      "DEF-71671C8E73EA": {
+        "defect_id": "DEF-71671C8E73EA",
+        "building": "1号楼",
+        "device_id": "EL-001",
+        "device_category": "elevator",
+        "defect_type": "门机故障",
+        "severity": "critical",
+        "description": "show断链测试1",
+        "first_seen": "2025-06-15T08:30:00",
+        "last_seen": "2025-06-15T08:30:00",
+        "status": "pending",
+        "source_rows": [
+          {
+            "row_id": "ROW-A152429E30",
+            "source_file": "data.csv",
+            "line_number": 2,
+            "raw_data": {
+              "楼栋": "1号楼",
+              "设备编号": "EL-001",
+              "设备类别": "elevator",
+              "缺陷类型": "门机故障",
+              "严重等级": "critical",
+              "缺陷描述": "show断链测试1",
+              "巡检时间": "2025-06-15 08:30:00",
+              "巡检员": "张三",
+              "具体位置": "1单元"
+            },
+            "import_time": "2026-06-19T14:08:41.064074"
+          }
+        ],
+        "review_remark": "",
+        "handler": "",
+        "status_history": [
+          {
+            "from": "",
+            "to": "pending",
+            "time": "2026-06-19T14:08:41.076136",
+            "remark": "初始创建",
+            "handler": "system"
+          }
+        ]
+      },
+      "__imported_files__": [
+        "data.csv"
+      ],
+      "__import_logs__": [
+        {
+          "log_id": "LOG-FA985AFFC1FB",
+          "log_type": "import",
+          "filename": "data.csv",
+          "batch_id": "BATCH-SHOW",
+          "result": "success",
+          "error_summary": "",
+          "timestamp": "2026-06-19T14:08:41.076173",
+          "total_rows": 1,
+          "valid_rows": 1,
+          "invalid_rows": 0,
+          "new_defects": 1,
+          "merged_defects": 0
+        }
+      ]
+    },
+    "review_entries": [
+      {
+        "defect_id": "DEF-71671C8E73EA",
+        "from_status": "pending",
+        "to_status": "dispatched",
+        "handler": "王工",
+        "remark": "第一步：单条派单"
+      }
+    ]
+  }
+]

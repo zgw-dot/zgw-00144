@@ -583,20 +583,34 @@ def show(ctx, defect_id):
             click.echo(f"  {h['time'][:19]}: {from_name} {_sym('arrow')} {to_name} "
                        f"[{handler}] {remark}")
 
-    last_review = state.get_last_review_log(defect_id=defect_id)
-    if last_review:
+    review_logs_defect = state.get_review_logs(defect_id=defect_id)
+    if review_logs_defect:
         click.echo()
-        click.echo("最近复核摘要:")
-        type_labels = {"review": "单条复核", "batch_review": "批量复核"}
-        type_label = type_labels.get(last_review.log_type, last_review.log_type)
-        from_name = STATUS_NAMES.get(last_review.from_status, last_review.from_status)
-        to_name = STATUS_NAMES.get(last_review.to_status, last_review.to_status)
-        click.echo(f"  操作类型: {type_label}")
-        click.echo(f"  状态变更: {from_name} {_sym('arrow')} {to_name}")
-        click.echo(f"  处理人: {last_review.handler or '-'}")
-        click.echo(f"  备注: {last_review.remark or '-'}")
-        click.echo(f"  时间: {last_review.timestamp[:19]}")
-        click.echo(f"  批次: {last_review.batch_id or '-'}")
+        click.echo(f"复核历史 ({len(review_logs_defect)} 条):")
+        type_labels = {
+            "review": "单条复核",
+            "batch_review": "批量复核",
+            "undo": "撤销"
+        }
+        type_colors = {
+            "review": "cyan",
+            "batch_review": "blue",
+            "undo": "yellow"
+        }
+        for i, log in enumerate(review_logs_defect, 1):
+            type_label = type_labels.get(log.log_type, log.log_type)
+            type_color = type_colors.get(log.log_type, "white")
+            from_name = STATUS_NAMES.get(log.from_status, log.from_status) if log.from_status else "无"
+            to_name = STATUS_NAMES.get(log.to_status, log.to_status) if log.to_status else "无"
+            click.echo(f"  [{i}] {click.style(type_label, fg=type_color)} "
+                       f"{from_name} {_sym('arrow')} {to_name}")
+            click.echo(f"      处理人: {log.handler or '-'}  时间: {log.timestamp[:19]}")
+            if log.remark:
+                click.echo(f"      备注: {log.remark}")
+            if log.batch_id:
+                click.echo(f"      批次: {log.batch_id}")
+            if log.parent_log_id:
+                click.echo(f"      批次组: {log.parent_log_id}")
 
 
 def main():

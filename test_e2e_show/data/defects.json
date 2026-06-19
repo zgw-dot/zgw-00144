@@ -1,0 +1,51 @@
+{
+  "DEF-71671C8E73EA": {
+    "defect_id": "DEF-71671C8E73EA",
+    "building": "1号楼",
+    "device_id": "EL-001",
+    "device_category": "elevator",
+    "defect_type": "门机故障",
+    "severity": "critical",
+    "description": "show断链测试1",
+    "first_seen": "2025-06-15T08:30:00",
+    "last_seen": "2025-06-15T08:30:00",
+    "status": "dispatched",
+    "source_rows": [
+      {
+        "row_id": "ROW-A152429E30",
+        "source_file": "data.csv",
+        "line_number": 2,
+        "raw_data": {
+          "楼栋": "1号楼",
+          "设备编号": "EL-001",
+          "设备类别": "elevator",
+          "缺陷类型": "门机故障",
+          "严重等级": "critical",
+          "缺陷描述": "show断链测试1",
+          "巡检时间": "2025-06-15 08:30:00",
+          "巡检员": "张三",
+          "具体位置": "1单元"
+        },
+        "import_time": "2026-06-19T14:08:41.064074"
+      }
+    ],
+    "review_remark": "第一步：单条派单",
+    "handler": "王工",
+    "status_history": [
+      {
+        "from": "",
+        "to": "pending",
+        "time": "2026-06-19T14:08:41.076136",
+        "remark": "初始创建",
+        "handler": "system"
+      },
+      {
+        "from": "pending",
+        "to": "dispatched",
+        "time": "2026-06-19T14:09:08.658434",
+        "remark": "第一步：单条派单",
+        "handler": "王工"
+      }
+    ]
+  }
+}

@@ -1238,6 +1238,47 @@ class TestReviewLogs:
         assert log_types_ordered.count("batch_review") >= 2
         assert log_types_ordered.count("review") >= 1
 
+    def test_single_defect_history_chain_complete_after_undo(self, config, state_with_data):
+        """单缺陷历史链路完整：单条复核→批量复核→撤销后，该缺陷所有历史仍可按顺序追溯"""
+        defects = state_with_data.list_defects()
+        d = defects[0].defect_id
+
+        from patrol_cli.workflow import review_defect, batch_review, undo_last
+
+        review_defect(state_with_data, d, "dispatched", handler="张工", remark="第一次单条")
+
+        batch_review(state_with_data, [d], "closed", handler="李组", remark="第二次批量")
+
+        undo_logs_before = len(state_with_data.get_review_logs(defect_id=d, log_type="undo"))
+        undo_last(state_with_data)
+
+        defect_logs = state_with_data.get_review_logs(defect_id=d)
+
+        assert len(defect_logs) == 3, f"该缺陷应有3条历史(单条+批量+撤销)，实际{len(defect_logs)}条"
+
+        log_types = [l.log_type for l in defect_logs]
+        assert log_types[0] == "undo", "最新的应该是撤销(倒序)"
+        assert log_types[1] == "batch_review", "然后是批量复核"
+        assert log_types[2] == "review", "最早的是单条复核"
+
+        undo_log = defect_logs[0]
+        assert undo_log.from_status == "closed"
+        assert undo_log.to_status == "dispatched"
+        assert undo_log.handler == "李组"
+        assert "撤销操作" in undo_log.remark
+
+        batch_log = defect_logs[1]
+        assert batch_log.from_status == "dispatched"
+        assert batch_log.to_status == "closed"
+        assert batch_log.handler == "李组"
+        assert batch_log.remark == "第二次批量"
+
+        single_log = defect_logs[2]
+        assert single_log.from_status == "pending"
+        assert single_log.to_status == "dispatched"
+        assert single_log.handler == "张工"
+        assert single_log.remark == "第一次单条"
+
     def test_logs_persist_after_restart(self, config, temp_data_dir, tmp_path):
         """复核日志重启后可查"""
         state = PatrolState(data_dir=temp_data_dir)

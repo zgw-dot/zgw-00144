@@ -1,0 +1,16 @@
+[
+  {
+    "log_id": "LOG-FA985AFFC1FB",
+    "log_type": "import",
+    "filename": "data.csv",
+    "batch_id": "BATCH-SHOW",
+    "result": "success",
+    "error_summary": "",
+    "timestamp": "2026-06-19T14:08:41.076173",
+    "total_rows": 1,
+    "valid_rows": 1,
+    "invalid_rows": 0,
+    "new_defects": 1,
+    "merged_defects": 0
+  }
+]
