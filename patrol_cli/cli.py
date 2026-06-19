@@ -17,6 +17,83 @@ DEFAULT_CONFIG = "examples/rules.yaml"
 DEFAULT_DATA_DIR = "data"
 
 
+def _terminal_supports_unicode() -> bool:
+    """检测终端是否支持 Unicode 字符（不产生实际输出）"""
+    encoding = getattr(sys.stdout, "encoding", "") or ""
+    encoding_lower = encoding.lower()
+    if "utf" in encoding_lower:
+        return True
+    try:
+        test_chars = "\u26a0\u2713"
+        encoding_obj = sys.stdout.encoding
+        if encoding_obj:
+            test_chars.encode(encoding_obj)
+            return True
+    except (UnicodeEncodeError, UnicodeError, LookupError, Exception):
+        pass
+    return False
+
+
+_TERMINAL_UNICODE = None
+
+
+def _sym(name: str) -> str:
+    """获取终端安全的符号，自动降级"""
+    global _TERMINAL_UNICODE
+    if _TERMINAL_UNICODE is None:
+        _TERMINAL_UNICODE = _terminal_supports_unicode()
+
+    symbols = {
+        "warn":  ("\u26a0", "[!]"),
+        "check": ("\u2713", "[OK]"),
+        "cross": ("\u2717", "[x]"),
+        "arrow": ("\u2192", "->"),
+        "file":  ("\U0001f4c4", "[FILE]"),
+    }
+
+    uni, ascii_fb = symbols.get(name, ("", ""))
+    return uni if _TERMINAL_UNICODE else ascii_fb
+
+
+def _ensure_encoding_safety():
+    """
+    全局编码安全兜底：如果终端编码不支持 Unicode，
+    将 stdout/stderr 的错误处理设为 replace，避免 UnicodeEncodeError 崩溃。
+    这是第二道防线，第一道是 _sym() 符号降级。
+    """
+    import io
+
+    def _wrap(stream):
+        if not hasattr(stream, "encoding") or not stream.encoding:
+            return stream
+        try:
+            "\u26a0\u2713".encode(stream.encoding)
+            return stream
+        except (UnicodeEncodeError, UnicodeError, LookupError):
+            pass
+
+        try:
+            buffer = stream.buffer
+        except AttributeError:
+            return stream
+
+        try:
+            new_stream = io.TextIOWrapper(
+                buffer,
+                encoding=stream.encoding,
+                errors="replace",
+                newline=stream.newlines if hasattr(stream, "newlines") else "",
+                line_buffering=getattr(stream, "line_buffering", False),
+                write_through=getattr(stream, "write_through", False),
+            )
+            return new_stream
+        except Exception:
+            return stream
+
+    sys.stdout = _wrap(sys.stdout)
+    sys.stderr = _wrap(sys.stderr)
+
+
 def _load_config(ctx, param, value):
     """加载配置"""
     try:
@@ -37,6 +114,7 @@ def _get_state(data_dir: str) -> PatrolState:
 @click.pass_context
 def cli(ctx, config, data_dir):
     """物业设备巡检缺陷复核 CLI 工具"""
+    _ensure_encoding_safety()
     ctx.ensure_object(dict)
     try:
         ctx.obj["config"] = load_rules(config)
@@ -68,9 +146,9 @@ def import_cmd(ctx, csv_file, batch, dry_run):
             click.echo(click.style("=== 预检结果 (dry-run) ===", fg="cyan", bold=True))
             click.echo(result.detailed_summary())
             if result.invalid_rows:
-                click.echo(click.style(f"⚠ 存在 {len(result.invalid_rows)} 条无效行，请修正后再导入", fg="yellow"))
+                click.echo(click.style(f"{_sym('warn')} 存在 {len(result.invalid_rows)} 条无效行，请修正后再导入", fg="yellow"))
             else:
-                click.echo(click.style("✓ 校验通过，可正式导入", fg="green"))
+                click.echo(click.style(f"{_sym('check')} 校验通过，可正式导入", fg="green"))
             click.echo(f"批次号: {batch}")
             click.echo(f"数据目录: {ctx.obj['data_dir']}")
         except FileNotFoundError as e:
@@ -116,11 +194,11 @@ def preview(ctx, csv_file, batch):
         click.echo(result.detailed_summary())
 
         if result.invalid_rows:
-            click.echo(click.style(f"⚠ 存在 {len(result.invalid_rows)} 条无效行，请修正后再导入", fg="yellow"))
+            click.echo(click.style(f"{_sym('warn')} 存在 {len(result.invalid_rows)} 条无效行，请修正后再导入", fg="yellow"))
         elif result.valid_rows == 0:
-            click.echo(click.style("⚠ 没有有效数据行", fg="yellow"))
+            click.echo(click.style(f"{_sym('warn')} 没有有效数据行", fg="yellow"))
         else:
-            click.echo(click.style("✓ 校验通过，可正式导入", fg="green"))
+            click.echo(click.style(f"{_sym('check')} 校验通过，可正式导入", fg="green"))
             click.echo(f"  将新增 {result.new_defects} 条缺陷")
             click.echo(f"  将合并 {result.merged_defects} 条来源到已有缺陷")
 

@@ -73,7 +73,7 @@ class ImportResult:
         if self.merged_defect_details:
             lines.append(f"合并缺陷列表 ({len(self.merged_defect_details)} 条):")
             for d in self.merged_defect_details:
-                lines.append(f"  → {d['defect_id']} ({d['building']} / {d['device_id']} / {d['defect_type']}) "
+                lines.append(f"  -> {d['defect_id']} ({d['building']} / {d['device_id']} / {d['defect_type']}) "
                              f"+{d['added_rows']} 条来源")
             lines.append("")
 
