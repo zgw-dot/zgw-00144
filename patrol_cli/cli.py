@@ -2378,6 +2378,14 @@ def followup_create(ctx, name, defect_ids, building, status, handler, remark,
             click.echo(f"数据目录: {ctx.obj['data_dir']}")
             return
 
+        if not preview.can_create:
+            click.echo(click.style(f"发现 {len(preview.conflicts)} 个冲突，无法创建:", fg="red", bold=True))
+            for c in preview.conflicts:
+                click.echo(f"  {_sym('cross')} {c}")
+            click.echo()
+            click.echo(click.style("提示: 有冲突时整批不创建", fg="yellow"))
+            sys.exit(1)
+
         plan = create_followup_plan(
             state, config, name,
             defect_ids=ids_list,
@@ -2388,6 +2396,7 @@ def followup_create(ctx, name, defect_ids, building, status, handler, remark,
             created_by=created_by,
             deadline_override_hours=deadline_hours,
             deadline_override=deadline,
+            status_fingerprint=preview.status_fingerprint,
         )
 
         click.echo(click.style(f"回访计划创建成功: {plan.plan_id}", fg="green", bold=True))

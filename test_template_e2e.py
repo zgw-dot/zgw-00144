@@ -4,6 +4,7 @@ import sys
 import shutil
 import json
 import tempfile
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -58,6 +59,44 @@ def create_sample_defect(state, defect_id, **kwargs):
     state.add_defect(defect)
     state.save()
     return defect
+
+
+@pytest.fixture
+def template_draft_env():
+    test_dir = tempfile.mkdtemp(prefix="patrol_test_")
+    state = PatrolState(data_dir=test_dir)
+    state.batch_id = "BATCH-TEST-001"
+
+    defect1 = create_sample_defect(state, "DEF-TEST-001")
+    defect2 = create_sample_defect(state, "DEF-TEST-002", building="2号楼", device_id="FA-001")
+
+    template = create_template(
+        state,
+        name="派单模板-A",
+        target_status="dispatched",
+        handler="张工",
+        remark="标准派单处理",
+        description="用于日常巡检缺陷派单"
+    )
+
+    draft = create_draft_from_template(
+        state,
+        template_id=template.template_id,
+        source="DEF-TEST-001,DEF-TEST-002",
+        source_type="ids",
+        name="草稿-派单测试"
+    )
+
+    execute_draft(state, draft.draft_id)
+
+    yield {
+        "test_dir": test_dir,
+        "state": state,
+        "template": template,
+        "draft": draft,
+    }
+
+    teardown_test_dir(test_dir)
 
 
 def test_1_template_draft_execute():
@@ -118,18 +157,18 @@ def test_1_template_draft_execute():
         assert "不受后续变更影响" in tpl_export["template_note"]
 
         print("  [OK] 测试1通过")
-        return test_dir, state
     finally:
         pass
 
 
-def test_2_modify_template_and_review_old(test_dir, state):
+def test_2_modify_template_and_review_old(template_draft_env):
     """测试2: 修改模板后回看旧记录，旧草稿应仍显示原始模板快照（不反查新模板）"""
     print("\n" + "=" * 60)
     print("测试2: 修改模板后回看旧记录")
     print("=" * 60)
 
     try:
+        state = template_draft_env["state"]
         drafts = state.list_drafts()
         old_draft = drafts[0]
         old_template_id = old_draft.template_id
@@ -158,13 +197,24 @@ def test_2_modify_template_and_review_old(test_dir, state):
         pass
 
 
-def test_3_restart_and_query(test_dir):
+def test_3_restart_and_query(template_draft_env):
     """测试3: 重启（重新加载）后查询，模板溯源信息保持一致"""
     print("\n" + "=" * 60)
     print("测试3: 重启后查询")
     print("=" * 60)
 
     try:
+        test_dir = template_draft_env["test_dir"]
+        state = template_draft_env["state"]
+        drafts = state.list_drafts()
+        old_draft = drafts[0]
+        update_template(
+            state,
+            template_id=old_draft.template_id,
+            name="派单模板-A-已改名",
+            handler="李工"
+        )
+
         state2 = PatrolState(data_dir=test_dir)
         drafts = state2.list_drafts()
         assert len(drafts) == 1
@@ -182,19 +232,27 @@ def test_3_restart_and_query(test_dir):
         assert templates[0].name == "派单模板-A-已改名"
 
         print("  [OK] 测试3通过")
-        return state2
     finally:
         pass
 
 
-def test_4_export_consistency(test_dir, state):
+def test_4_export_consistency(template_draft_env):
     """测试4: 导出核对，CSV 中模板字段应与快照一致"""
     print("\n" + "=" * 60)
     print("测试4: 导出核对")
     print("=" * 60)
 
     try:
+        test_dir = template_draft_env["test_dir"]
+        state = template_draft_env["state"]
         drafts = state.list_drafts()
+        old_draft = drafts[0]
+        update_template(
+            state,
+            template_id=old_draft.template_id,
+            name="派单模板-A-已改名",
+            handler="李工"
+        )
         draft = drafts[0]
 
         csv_path = os.path.join(test_dir, "draft_export.csv")
@@ -235,13 +293,15 @@ def test_4_export_consistency(test_dir, state):
         pass
 
 
-def test_5_delete_template_and_trace(test_dir, state):
+def test_5_delete_template_and_trace(template_draft_env):
     """测试5: 删除模板后，旧草稿仍能通过快照溯源"""
     print("\n" + "=" * 60)
     print("测试5: 删除模板后溯源")
     print("=" * 60)
 
     try:
+        test_dir = template_draft_env["test_dir"]
+        state = template_draft_env["state"]
         drafts = state.list_drafts()
         draft = drafts[0]
         template_id = draft.template_id
@@ -1234,48 +1294,4 @@ def test_18_mixed_batch_precheck():
 
 
 if __name__ == "__main__":
-    import traceback
-    error_file = Path(__file__).parent / "test_error.log"
-    print("开始端到端测试：草稿执行-模板溯源链路")
-    print("=" * 60)
-
-    test_dir = None
-    state = None
-    try:
-        test_dir, state = test_1_template_draft_execute()
-        test_2_modify_template_and_review_old(test_dir, state)
-        state = test_3_restart_and_query(test_dir)
-        test_4_export_consistency(test_dir, state)
-        test_5_delete_template_and_trace(test_dir, state)
-        test_6_non_template_draft()
-        test_7_old_data_missing_snapshot()
-        test_8_incomplete_snapshot_detail_list_export()
-        test_9_incomplete_snapshot_with_deleted_template()
-        test_10_template_delete_then_history_review()
-        test_11_restart_consistency_for_all_tiers()
-        test_12_classify_snapshot_unit()
-        test_13_snapshot_health_check()
-        test_14_snapshot_patch_and_seal()
-        test_15_patch_batch_conflict()
-        test_16_patch_immutability()
-        test_17_patch_restart_consistency()
-        test_18_mixed_batch_precheck()
-
-        print("\n" + "=" * 60)
-        print("[OK] 全部端到端测试通过！")
-        print("=" * 60)
-    except AssertionError as e:
-        msg = "\n[FAIL] 断言失败!\n" + traceback.format_exc()
-        print(msg)
-        with open(error_file, "w", encoding="utf-8") as f:
-            f.write(msg)
-        sys.exit(1)
-    except Exception as e:
-        msg = f"\n[FAIL] 测试异常: {e}\n" + traceback.format_exc()
-        print(msg)
-        with open(error_file, "w", encoding="utf-8") as f:
-            f.write(msg)
-        sys.exit(1)
-    finally:
-        if test_dir:
-            teardown_test_dir(test_dir)
+    sys.exit(pytest.main([__file__, "-v"]))

@@ -24,11 +24,6 @@ def _collect_defect_ids_from_source(
     building: Optional[str] = None,
     status: Optional[str] = None,
 ) -> List[str]:
-    """
-    根据筛选条件收集缺陷ID列表。
-
-    优先级：defect_ids > building/status 组合
-    """
     if defect_ids:
         return list(defect_ids)
 
@@ -41,29 +36,26 @@ def _calculate_deadline(
     severity: str,
     override_hours: Optional[int] = None
 ) -> str:
-    """
-    根据严重等级计算截止时间。
-    如果提供了 override_hours，则使用覆盖值。
-    """
     hours = override_hours if override_hours is not None else config.get_rectify_hours(severity)
     deadline = datetime.now() + timedelta(hours=hours)
     return deadline.isoformat()
 
 
-def _check_create_conflicts(
+def _validate_candidates(
     state: PatrolState,
-    defect_ids: List[str]
+    defect_ids: List[str],
+    status_fingerprint: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[str], List[str], List[str], List[str]]:
     """
-    检查创建回访计划前的冲突。
+    校验候选缺陷集合，返回所有冲突（一次性报全）。
 
     Returns:
-        (active_plan_conflicts, status_changed, not_found, duplicates)
+        (active_plan_conflicts, status_drift_conflicts, not_found, duplicates)
     """
     seen = set()
     duplicates = []
     not_found = []
-    status_changed = []
+    status_drift_conflicts = []
     active_plan_conflicts = []
 
     for defect_id in defect_ids:
@@ -77,6 +69,15 @@ def _check_create_conflicts(
             not_found.append(defect_id)
             continue
 
+        if status_fingerprint and defect_id in status_fingerprint:
+            expected = status_fingerprint[defect_id]
+            if defect.status != expected:
+                expected_name = STATUS_NAMES.get(expected, expected)
+                actual_name = STATUS_NAMES.get(defect.status, defect.status)
+                status_drift_conflicts.append(
+                    f"{defect_id}: 状态已变更（预览时={expected_name}, 当前={actual_name}）"
+                )
+
         active_plans = state.get_followup_plans_for_defect(defect_id, active_only=True)
         if active_plans:
             plan_names = [f"{p.name}({p.plan_id})" for p in active_plans]
@@ -84,10 +85,10 @@ def _check_create_conflicts(
                 f"{defect_id}: 已存在于未完成计划中: {', '.join(plan_names)}"
             )
 
-    return active_plan_conflicts, status_changed, not_found, duplicates
+    return active_plan_conflicts, status_drift_conflicts, not_found, duplicates
 
 
-def preview_create_followup(
+def _prepare_candidates(
     state: PatrolState,
     config: RulesConfig,
     name: str,
@@ -99,11 +100,14 @@ def preview_create_followup(
     created_by: str = "",
     deadline_override_hours: Optional[int] = None,
     deadline_override: Optional[str] = None,
-) -> FollowUpCreatePreview:
+    status_fingerprint: Optional[Dict[str, str]] = None,
+) -> Tuple[List[Dict[str, Any]], List[str], List[str], Dict[str, str]]:
     """
-    预览创建回访计划（dry-run）。
+    构建候选集并做整批校验——preview 与 create 共用此入口。
 
-    返回预览结果，包含将包含的缺陷、冲突和警告。
+    Returns:
+        (items, conflicts, warnings, fingerprint)
+        fingerprint: {defect_id: status} 供后续 create 做快照校验
     """
     if not name.strip():
         raise FollowUpError("计划名称不能为空")
@@ -113,7 +117,9 @@ def preview_create_followup(
     if not ids:
         raise FollowUpError("未找到符合条件的缺陷记录")
 
-    active_conflicts, status_changed, not_found, duplicates = _check_create_conflicts(state, ids)
+    active_conflicts, status_drift, not_found, duplicates = _validate_candidates(
+        state, ids, status_fingerprint=status_fingerprint
+    )
 
     items = []
     warnings = []
@@ -128,13 +134,21 @@ def preview_create_followup(
     if active_conflicts:
         conflicts.extend(active_conflicts)
 
+    if status_drift:
+        conflicts.extend(status_drift)
+
+    skipped = set(duplicates) | set(not_found)
+    fingerprint: Dict[str, str] = {}
+
     for defect_id in ids:
-        if defect_id in duplicates or defect_id in not_found:
+        if defect_id in skipped:
             continue
 
         defect = state.get_defect(defect_id)
         if not defect:
             continue
+
+        fingerprint[defect_id] = defect.status
 
         if deadline_override:
             deadline = deadline_override
@@ -154,6 +168,39 @@ def preview_create_followup(
         }
         items.append(item_info)
 
+    return items, conflicts, warnings, fingerprint
+
+
+def preview_create_followup(
+    state: PatrolState,
+    config: RulesConfig,
+    name: str,
+    defect_ids: Optional[List[str]] = None,
+    building: Optional[str] = None,
+    status: Optional[str] = None,
+    handler: str = "",
+    remark: str = "",
+    created_by: str = "",
+    deadline_override_hours: Optional[int] = None,
+    deadline_override: Optional[str] = None,
+) -> FollowUpCreatePreview:
+    """
+    预览创建回访计划（dry-run）。
+
+    返回预览结果，包含将包含的缺陷、冲突、警告和状态指纹。
+    """
+    items, conflicts, warnings, fingerprint = _prepare_candidates(
+        state, config, name,
+        defect_ids=defect_ids,
+        building=building,
+        status=status,
+        handler=handler,
+        remark=remark,
+        created_by=created_by,
+        deadline_override_hours=deadline_override_hours,
+        deadline_override=deadline_override,
+    )
+
     can_create = len(conflicts) == 0
 
     return FollowUpCreatePreview(
@@ -165,7 +212,8 @@ def preview_create_followup(
         conflicts=conflicts,
         warnings=warnings,
         total_count=len(items),
-        can_create=can_create
+        can_create=can_create,
+        status_fingerprint=fingerprint,
     )
 
 
@@ -181,16 +229,19 @@ def create_followup_plan(
     created_by: str = "",
     deadline_override_hours: Optional[int] = None,
     deadline_override: Optional[str] = None,
+    status_fingerprint: Optional[Dict[str, str]] = None,
 ) -> FollowUpPlan:
     """
     创建回访计划。
 
-    整批校验：如果有任何冲突（缺陷在其他未完成计划中、不存在、重复），
-    整批失败，不创建任何计划。
+    整批校验：如果有任何冲突（缺陷在其他未完成计划中、不存在、重复、
+    或状态自预览后发生了变更），整批失败，不创建任何计划，
+    不写入任何日志或状态。
 
-    全部通过后，创建计划并保存缺陷快照。
+    若提供了 status_fingerprint（来自 preview 返回值），
+    则校验每个缺陷当前状态是否与指纹一致，不一致即冲突。
     """
-    preview = preview_create_followup(
+    items, conflicts, warnings, fingerprint = _prepare_candidates(
         state, config, name,
         defect_ids=defect_ids,
         building=building,
@@ -200,17 +251,18 @@ def create_followup_plan(
         created_by=created_by,
         deadline_override_hours=deadline_override_hours,
         deadline_override=deadline_override,
+        status_fingerprint=status_fingerprint,
     )
 
-    if not preview.can_create:
-        error_msg = "回访计划创建冲突，整批不创建：\n" + "\n".join(preview.conflicts)
+    if conflicts:
+        error_msg = "回访计划创建冲突，整批不创建：\n" + "\n".join(conflicts)
         raise FollowUpError(error_msg)
 
     plan_id = generate_followup_id()
     now = datetime.now().isoformat()
 
     plan_items = []
-    for item_info in preview.items:
+    for item_info in items:
         item = FollowUpPlanItem(
             defect_id=item_info["defect_id"],
             defect_snapshot=item_info["defect_snapshot"],
@@ -226,7 +278,7 @@ def create_followup_plan(
         plan_id=plan_id,
         name=name.strip(),
         handler=handler,
-        deadline=preview.items[0]["deadline"] if preview.items and not deadline_override else (deadline_override or ""),
+        deadline=items[0]["deadline"] if items and not deadline_override else (deadline_override or ""),
         remark=remark,
         created_at=now,
         created_by=created_by,
@@ -251,9 +303,6 @@ def dispatch_followup_plan(
     handler: str = "",
     dispatched_by: str = "",
 ) -> FollowUpPlan:
-    """
-    签收回访计划。
-    """
     plan = state.get_followup_plan(plan_id)
     if not plan:
         raise FollowUpError(f"回访计划不存在: {plan_id}")
@@ -290,9 +339,6 @@ def complete_followup_item(
     result_remark: str = "",
     result_by: str = "",
 ) -> FollowUpPlan:
-    """
-    完成单个回访条目。
-    """
     plan = state.get_followup_plan(plan_id)
     if not plan:
         raise FollowUpError(f"回访计划不存在: {plan_id}")
@@ -341,10 +387,6 @@ def complete_followup_plan(
     results: Optional[Dict[str, Dict[str, str]]] = None,
     result_by: str = "",
 ) -> FollowUpPlan:
-    """
-    批量完成回访计划中的所有条目。
-    results: {defect_id: {"result": "...", "result_remark": "..."}}
-    """
     plan = state.get_followup_plan(plan_id)
     if not plan:
         raise FollowUpError(f"回访计划不存在: {plan_id}")
@@ -380,9 +422,6 @@ def cancel_followup_plan(
     plan_id: str,
     reason: str = "",
 ) -> FollowUpPlan:
-    """
-    撤销回访计划。
-    """
     plan = state.get_followup_plan(plan_id)
     if not plan:
         raise FollowUpError(f"回访计划不存在: {plan_id}")
@@ -411,9 +450,6 @@ def get_followup_plan_detail(
     state: PatrolState,
     plan_id: str,
 ) -> dict:
-    """
-    获取回访计划详情，包含每个条目的当前状态和回访结果。
-    """
     plan = state.get_followup_plan(plan_id)
     if not plan:
         raise FollowUpError(f"回访计划不存在: {plan_id}")
@@ -475,9 +511,6 @@ def list_followup_plans(
     handler: Optional[str] = None,
     limit: int = 0,
 ) -> List[dict]:
-    """
-    列出回访计划，带统计信息。
-    """
     plans = state.list_followup_plans(status=status, handler=handler, limit=limit)
 
     result = []
@@ -508,9 +541,6 @@ def export_followup_plans_json(
     file_path: str,
     plan_ids: Optional[List[str]] = None,
 ) -> int:
-    """
-    导出回访计划到 JSON 文件。
-    """
     import json
     from pathlib import Path
 
@@ -539,9 +569,6 @@ def export_followup_plans_csv(
     file_path: str,
     plan_ids: Optional[List[str]] = None,
 ) -> int:
-    """
-    导出回访计划到 CSV 文件（含明细）。
-    """
     import csv
     from pathlib import Path
 
@@ -606,9 +633,6 @@ def import_followup_plans_json(
     file_path: str,
     overwrite: bool = False,
 ) -> dict:
-    """
-    从 JSON 文件导入回访计划。
-    """
     import json
     from pathlib import Path
 

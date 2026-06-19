@@ -778,6 +778,7 @@ class FollowUpCreatePreview:
     warnings: List[str] = field(default_factory=list)
     total_count: int = 0
     can_create: bool = True
+    status_fingerprint: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

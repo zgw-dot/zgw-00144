@@ -126,6 +126,10 @@ class TestCreateFollowUp:
         assert len(preview.items) == 2
         assert len(preview.conflicts) == 0
         assert len(state.followup_plans) == 0
+        assert preview.status_fingerprint == {
+            "DEF-FUP-DRY1": "pending",
+            "DEF-FUP-DRY2": "pending",
+        }
 
     def test_deadline_from_severity(self, tmp_path):
         state = _setup_state(tmp_path)
@@ -307,6 +311,166 @@ class TestConflictInterception:
             pass
 
         assert len(state.followup_plans) == before_count
+
+
+class TestStatusDriftInterception:
+    def test_status_drift_after_preview_rejects_create(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-DRIFT-1", status="pending")
+        _add_defect(state, "DEF-DRIFT-2", status="pending")
+
+        preview = preview_create_followup(
+            state, config, "状态漂移测试",
+            defect_ids=["DEF-DRIFT-1", "DEF-DRIFT-2"]
+        )
+        assert preview.can_create is True
+        fingerprint = preview.status_fingerprint
+
+        defect = state.get_defect("DEF-DRIFT-1")
+        defect.status = "closed"
+        state.save()
+
+        try:
+            create_followup_plan(
+                state, config, "状态漂移测试",
+                defect_ids=["DEF-DRIFT-1", "DEF-DRIFT-2"],
+                status_fingerprint=fingerprint,
+            )
+            assert False, "应该因状态漂移而整批失败"
+        except FollowUpError as e:
+            assert "状态已变更" in str(e)
+
+        assert len(state.followup_plans) == 0
+
+    def test_no_fingerprint_allows_create_despite_change(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-NOFP-1", status="pending")
+
+        defect = state.get_defect("DEF-NOFP-1")
+        defect.status = "closed"
+        state.save()
+
+        plan = create_followup_plan(
+            state, config, "无指纹测试",
+            defect_ids=["DEF-NOFP-1"],
+        )
+        assert plan is not None
+        assert len(state.followup_plans) == 1
+
+    def test_drift_with_other_conflicts_reports_all(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-MIX-DRIFT", status="pending")
+
+        preview = preview_create_followup(
+            state, config, "混合冲突测试",
+            defect_ids=["DEF-MIX-DRIFT", "DEF-MIX-NONEXIST"]
+        )
+        assert not preview.can_create
+
+        defect = state.get_defect("DEF-MIX-DRIFT")
+        defect.status = "closed"
+        state.save()
+
+        try:
+            create_followup_plan(
+                state, config, "混合冲突测试",
+                defect_ids=["DEF-MIX-DRIFT", "DEF-MIX-NONEXIST"],
+                status_fingerprint=preview.status_fingerprint,
+            )
+            assert False, "应该整批失败"
+        except FollowUpError as e:
+            msg = str(e)
+            assert "不存在" in msg
+            assert "状态已变更" in msg
+
+    def test_preview_fingerprint_matches_current_state(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-FP-OK", status="pending")
+
+        preview = preview_create_followup(
+            state, config, "指纹一致测试",
+            defect_ids=["DEF-FP-OK"]
+        )
+
+        plan = create_followup_plan(
+            state, config, "指纹一致测试",
+            defect_ids=["DEF-FP-OK"],
+            status_fingerprint=preview.status_fingerprint,
+        )
+        assert plan is not None
+
+    def test_multiple_defects_partial_drift_rejects_all(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-PDRIFT-1", status="pending")
+        _add_defect(state, "DEF-PDRIFT-2", status="pending")
+
+        preview = preview_create_followup(
+            state, config, "部分漂移测试",
+            defect_ids=["DEF-PDRIFT-1", "DEF-PDRIFT-2"]
+        )
+        fingerprint = preview.status_fingerprint
+
+        defect = state.get_defect("DEF-PDRIFT-2")
+        defect.status = "dispatched"
+        state.save()
+
+        try:
+            create_followup_plan(
+                state, config, "部分漂移测试",
+                defect_ids=["DEF-PDRIFT-1", "DEF-PDRIFT-2"],
+                status_fingerprint=fingerprint,
+            )
+            assert False, "只要有一个漂移就应整批失败"
+        except FollowUpError as e:
+            assert "DEF-PDRIFT-2" in str(e)
+            assert "状态已变更" in str(e)
+
+        assert len(state.followup_plans) == 0
+
+
+class TestConflictSummary:
+    def test_all_conflict_types_reported_at_once(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-COMB-1", status="pending")
+        _add_defect(state, "DEF-COMB-2", status="pending")
+
+        create_followup_plan(
+            state, config, "已有计划",
+            defect_ids=["DEF-COMB-1"]
+        )
+
+        try:
+            create_followup_plan(
+                state, config, "组合冲突",
+                defect_ids=["DEF-COMB-1", "DEF-COMB-1", "DEF-COMB-NONEXIST"]
+            )
+            assert False, "应抛出冲突"
+        except FollowUpError as e:
+            msg = str(e)
+            assert "重复" in msg
+            assert "不存在" in msg
+            assert "未完成计划" in msg
+
+    def test_duplicate_and_not_found_together(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+
+        try:
+            create_followup_plan(
+                state, config, "双冲突",
+                defect_ids=["DEF-NON-A", "DEF-NON-A"]
+            )
+            assert False
+        except FollowUpError as e:
+            msg = str(e)
+            assert "重复" in msg
+            assert "不存在" in msg
 
 
 class TestDispatch:
@@ -864,3 +1028,135 @@ class TestRestartPersistence:
         assert detail["name"] == "详情重启"
         assert detail["handler"] == "详情测试"
         assert detail["total_items"] == 1
+
+    def test_query_after_restart_with_status_drift(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-RST-DRIFT", status="pending")
+
+        plan = create_followup_plan(
+            state, config, "重启漂移查询",
+            defect_ids=["DEF-RST-DRIFT"]
+        )
+
+        defect = state.get_defect("DEF-RST-DRIFT")
+        defect.status = "closed"
+        state.save()
+
+        state2 = PatrolState(data_dir=str(tmp_path))
+        detail = get_followup_plan_detail(state2, plan.plan_id)
+        item = detail["items"][0]
+
+        assert item["snapshot_status"] == "pending"
+        assert item["current_status"] == "closed"
+
+
+class TestJsonCsvRoundTrip:
+    def test_json_round_trip(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-RT-J1")
+        _add_defect(state, "DEF-RT-J2", building="2号楼")
+
+        plan = create_followup_plan(
+            state, config, "往返测试",
+            defect_ids=["DEF-RT-J1", "DEF-RT-J2"],
+            handler="往返员",
+            remark="往返备注"
+        )
+        dispatch_followup_plan(state, plan.plan_id)
+        complete_followup_item(
+            state, plan.plan_id, "DEF-RT-J1",
+            result="已修复", result_by="测试员"
+        )
+
+        output = str(tmp_path / "roundtrip.json")
+        export_followup_plans_json(state, output)
+
+        state2 = PatrolState(data_dir=str(tmp_path / "rt_new"))
+        state2.batch_id = "BATCH-RT"
+        _add_defect(state2, "DEF-RT-J1")
+        _add_defect(state2, "DEF-RT-J2", building="2号楼")
+
+        result = import_followup_plans_json(state2, output)
+        assert result["imported_count"] == 1
+        assert result["error_count"] == 0
+
+        imported = state2.get_followup_plan(plan.plan_id)
+        assert imported.name == "往返测试"
+        assert imported.handler == "往返员"
+        assert imported.remark == "往返备注"
+        assert imported.status == "dispatched"
+        assert len(imported.items) == 2
+
+        item1 = next(i for i in imported.items if i.defect_id == "DEF-RT-J1")
+        assert item1.item_status == "completed"
+        assert item1.result == "已修复"
+
+        item2 = next(i for i in imported.items if i.defect_id == "DEF-RT-J2")
+        assert item2.item_status == "pending"
+
+    def test_csv_export_reimport_via_json(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-RT-C1")
+        _add_defect(state, "DEF-RT-C2")
+
+        plan = create_followup_plan(
+            state, config, "CSV往返测试",
+            defect_ids=["DEF-RT-C1", "DEF-RT-C2"],
+            handler="CSV员"
+        )
+
+        json_output = str(tmp_path / "csv_rt.json")
+        export_followup_plans_json(state, json_output)
+
+        csv_output = str(tmp_path / "csv_rt.csv")
+        row_count = export_followup_plans_csv(state, csv_output)
+        assert row_count == 2
+
+        with open(csv_output, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        assert len(rows) == 2
+        assert any(r["缺陷编号"] == "DEF-RT-C1" for r in rows)
+        assert any(r["缺陷编号"] == "DEF-RT-C2" for r in rows)
+
+        state2 = PatrolState(data_dir=str(tmp_path / "csv_rt_new"))
+        state2.batch_id = "BATCH-CSV-RT"
+        _add_defect(state2, "DEF-RT-C1")
+        _add_defect(state2, "DEF-RT-C2")
+
+        result = import_followup_plans_json(state2, json_output)
+        assert result["imported_count"] == 1
+
+        imported = state2.get_followup_plan(plan.plan_id)
+        assert imported.name == "CSV往返测试"
+        assert len(imported.items) == 2
+
+    def test_multiple_plans_round_trip(self, tmp_path):
+        state = _setup_state(tmp_path)
+        config = _load_config()
+        _add_defect(state, "DEF-MRT-1")
+        _add_defect(state, "DEF-MRT-2")
+        _add_defect(state, "DEF-MRT-3")
+
+        plan1 = create_followup_plan(state, config, "多计划1", defect_ids=["DEF-MRT-1"])
+        plan2 = create_followup_plan(state, config, "多计划2", defect_ids=["DEF-MRT-2", "DEF-MRT-3"])
+
+        output = str(tmp_path / "multi_rt.json")
+        count = export_followup_plans_json(state, output)
+        assert count == 2
+
+        state2 = PatrolState(data_dir=str(tmp_path / "multi_rt_new"))
+        state2.batch_id = "BATCH-MRT"
+        _add_defect(state2, "DEF-MRT-1")
+        _add_defect(state2, "DEF-MRT-2")
+        _add_defect(state2, "DEF-MRT-3")
+
+        result = import_followup_plans_json(state2, output)
+        assert result["imported_count"] == 2
+
+        plans = list_followup_plans(state2)
+        assert len(plans) == 2
