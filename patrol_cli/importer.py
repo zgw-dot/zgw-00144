@@ -123,6 +123,17 @@ def validate_and_transform_rows(
             if "building" not in [e.split(": ")[-1] for e in errors]:
                 errors.append("楼栋信息缺失")
 
+        if device_category and not config.get_category(device_category):
+            errors.append(f"设备类别不在配置中: {device_category}")
+
+        if severity and not config.get_severity(severity):
+            errors.append(f"严重等级不在配置中: {severity}")
+
+        if device_category and defect_type:
+            cat = config.get_category(device_category)
+            if cat and defect_type not in cat.defect_types:
+                errors.append(f"缺陷类型不在 {device_category} 的允许列表中: {defect_type}")
+
         if errors:
             invalid_rows.append({
                 "line": line_number,

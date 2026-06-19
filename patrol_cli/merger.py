@@ -140,8 +140,6 @@ def import_and_merge(
     )
     from pathlib import Path
 
-    state.init_batch(batch_id)
-
     source_file = Path(csv_path).name
 
     if state.is_file_imported(source_file):
@@ -157,8 +155,21 @@ def import_and_merge(
     result.valid_rows = len(valid_rows)
     result.invalid_rows = invalid_rows
 
+    if invalid_rows:
+        error_lines = []
+        for item in invalid_rows[:10]:
+            error_lines.append(f"第{item['line']}行: {'; '.join(item['errors'])}")
+        if len(invalid_rows) > 10:
+            error_lines.append(f"... 还有 {len(invalid_rows) - 10} 条错误")
+        raise ValueError(
+            f"文件校验失败，共 {len(invalid_rows)} 行不合法:\n" +
+            "\n".join(error_lines)
+        )
+
     if not valid_rows:
         return result
+
+    state.init_batch(batch_id)
 
     snapshot = state.snapshot_defects()
 
