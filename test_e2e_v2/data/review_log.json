@@ -1,0 +1,62 @@
+[
+  {
+    "log_id": "LOG-FD8E34050C69",
+    "log_type": "review",
+    "defect_id": "DEF-0164410FB7D7",
+    "from_status": "pending",
+    "to_status": "dispatched",
+    "handler": "王工",
+    "remark": "第一次：单条派单",
+    "timestamp": "2026-06-19T13:47:39.795501",
+    "batch_id": "BATCH-V2",
+    "parent_log_id": ""
+  },
+  {
+    "log_id": "LOG-57B83E0157B2",
+    "log_type": "batch_review",
+    "defect_id": "DEF-28F848E57B55",
+    "from_status": "pending",
+    "to_status": "false_positive",
+    "handler": "李组",
+    "remark": "第二次：批量误报",
+    "timestamp": "2026-06-19T13:47:40.482051",
+    "batch_id": "BATCH-V2",
+    "parent_log_id": "LOG-553625352EEC"
+  },
+  {
+    "log_id": "LOG-37FD47EC0AF5",
+    "log_type": "batch_review",
+    "defect_id": "DEF-746B3070DFBD",
+    "from_status": "pending",
+    "to_status": "false_positive",
+    "handler": "李组",
+    "remark": "第二次：批量误报",
+    "timestamp": "2026-06-19T13:47:40.482072",
+    "batch_id": "BATCH-V2",
+    "parent_log_id": "LOG-553625352EEC"
+  },
+  {
+    "log_id": "LOG-7E1AB68924AA",
+    "log_type": "undo",
+    "defect_id": "DEF-28F848E57B55",
+    "from_status": "false_positive",
+    "to_status": "pending",
+    "handler": "李组",
+    "remark": "撤销操作: 批量复核 2 条→误报",
+    "timestamp": "2026-06-19T13:47:58.498941",
+    "batch_id": "BATCH-V2",
+    "parent_log_id": ""
+  },
+  {
+    "log_id": "LOG-FDC40D9410B0",
+    "log_type": "undo",
+    "defect_id": "DEF-746B3070DFBD",
+    "from_status": "false_positive",
+    "to_status": "pending",
+    "handler": "李组",
+    "remark": "撤销操作: 批量复核 2 条→误报",
+    "timestamp": "2026-06-19T13:47:58.499016",
+    "batch_id": "BATCH-V2",
+    "parent_log_id": ""
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "log_id": "LOG-2FFDFEFF6606",
+    "log_type": "import",
+    "filename": "data.csv",
+    "batch_id": "BATCH-V2",
+    "result": "success",
+    "error_summary": "",
+    "timestamp": "2026-06-19T13:45:56.177786",
+    "total_rows": 3,
+    "valid_rows": 3,
+    "invalid_rows": 0,
+    "new_defects": 3,
+    "merged_defects": 0
+  }
+]

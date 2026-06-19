@@ -1152,7 +1152,7 @@ class TestReviewLogs:
         assert action is not None
 
         logs_after_undo = len(state_with_data.review_logs)
-        assert logs_after_undo == logs_before_undo
+        assert logs_after_undo == logs_before_undo + 1
 
         last_log = state_with_data.get_review_logs(limit=1)[0]
         assert last_log.log_type == "undo"
@@ -1205,6 +1205,38 @@ class TestReviewLogs:
             assert log.to_status == "pending"
             assert log.handler == "批量员B"
             assert "撤销操作" in log.remark
+
+    def test_undo_does_not_delete_existing_review_logs(self, config, state_with_data):
+        """撤销不删除已写入的复核日志：单条→批量→撤销后，所有历史都还在"""
+        defects = state_with_data.list_defects()
+        d1 = defects[0].defect_id
+        d2 = defects[1].defect_id
+        d3 = defects[2].defect_id if len(defects) > 2 else d2
+
+        from patrol_cli.workflow import review_defect, batch_review, undo_last
+
+        review_defect(state_with_data, d1, "dispatched", handler="A", remark="单条复核")
+        logs_after_single = len(state_with_data.review_logs)
+
+        batch_review(state_with_data, [d2, d3], "closed", handler="B", remark="批量复核")
+        logs_after_batch = len(state_with_data.review_logs)
+        assert logs_after_batch == logs_after_single + 2
+
+        undo_last(state_with_data)
+        logs_after_undo = len(state_with_data.review_logs)
+        assert logs_after_undo == logs_after_batch + 2
+
+        single_logs = state_with_data.get_review_logs(log_type="review")
+        assert len(single_logs) >= 1, "单条复核日志不应被撤销删除"
+
+        batch_logs = state_with_data.get_review_logs(log_type="batch_review")
+        assert len(batch_logs) >= 2, "批量复核日志不应被撤销删除"
+
+        all_logs = state_with_data.get_review_logs()
+        log_types_ordered = [l.log_type for l in all_logs]
+        assert log_types_ordered.count("undo") >= 2
+        assert log_types_ordered.count("batch_review") >= 2
+        assert log_types_ordered.count("review") >= 1
 
     def test_logs_persist_after_restart(self, config, temp_data_dir, tmp_path):
         """复核日志重启后可查"""
@@ -1522,6 +1554,12 @@ class TestReviewFullChain:
 
         undo_logs = state.get_review_logs(log_type="undo")
         assert len(undo_logs) >= 1
+
+        batch_logs_after_undo = state.get_review_logs(log_type="batch_review")
+        assert len(batch_logs_after_undo) >= 2, "撤销后批量复核日志不应被删除"
+
+        single_logs_after_undo = state.get_review_logs(log_type="review")
+        assert len(single_logs_after_undo) >= 1, "撤销后单条复核日志不应被删除"
 
         state_reload = PatrolState(data_dir=temp_data_dir)
         assert state_reload.get_defect(d1).status == "dispatched"
